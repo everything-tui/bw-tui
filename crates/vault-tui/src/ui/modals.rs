@@ -21,6 +21,7 @@ pub fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::Generator { .. } => draw_generator(frame, app),
         Overlay::FolderForm { .. } => draw_folder_form(frame, app),
         Overlay::ConfirmDelete { .. } => draw_confirm_delete(frame, app),
+        Overlay::ProfileManager { .. } => super::profiles::draw_profile_manager(frame, app),
     }
 }
 

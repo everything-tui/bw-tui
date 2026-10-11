@@ -1,6 +1,7 @@
 //! bitwarden-tui — Vaultwarden password manager terminal UI.
 
-use std::io::{self, stdout, IsTerminal};
+use std::io::{self, stdout, IsTerminal, Write};
+use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -13,10 +14,12 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tracing_subscriber::EnvFilter;
+use vault_session::app_data_dir;
 use vault_tui::app::{self, App};
 use vault_tui::debug_log;
-use vault_tui::ui::{self, PaneVisibility};
 use vault_tui::events;
+use vault_tui::profiles::{load_registry_from, profile_has_auth};
+use vault_tui::ui::{self, PaneVisibility};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -25,6 +28,14 @@ use vault_tui::events;
     version
 )]
 struct Cli {
+    /// Named profile (see profiles.json)
+    #[arg(long, env = "BW_PROFILE")]
+    profile: Option<String>,
+
+    /// List profiles and exit
+    #[arg(long)]
+    list_profiles: bool,
+
     /// Vaultwarden / Bitwarden server URL
     #[arg(long, env = "BW_SERVER")]
     server: Option<String>,
@@ -39,14 +50,34 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    if let Err(e) = run().await {
+        eprintln!("error: {e:#}");
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("vault_tui=info".parse()?))
         .with_writer(io::stderr)
         .init();
 
     let cli = Cli::parse();
-    let mut app = App::new(cli.server, cli.email, cli.mock);
+
+    if cli.list_profiles {
+        list_profiles();
+        return Ok(());
+    }
+
+    let mut app = match App::new(cli.profile, cli.server, cli.email, cli.mock) {
+        Ok(app) => app,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            std::process::exit(2);
+        }
+    };
     app.restore_session_if_saved().await;
 
     // #region agent log
@@ -60,6 +91,7 @@ async fn main() -> Result<()> {
             "login_field": format!("{:?}", app.login_field),
             "server_len": app.server_url.len(),
             "email_len": app.email.len(),
+            "profile": app.active_profile_id,
             "stdin_is_tty": io::stdin().is_terminal(),
             "stdout_is_tty": io::stdout().is_terminal(),
         }),
@@ -70,6 +102,37 @@ async fn main() -> Result<()> {
     let result = run_loop(&mut terminal, &mut app).await;
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn list_profiles() {
+    let root = app_data_dir();
+    let file = load_registry_from(&root);
+    let mut out = io::stdout();
+    let _ = writeln!(
+        out,
+        "{:<2} {:<16} {:<20} {:<32} {}",
+        "", "ID", "NAME", "EMAIL", "SERVER"
+    );
+    for p in &file.profiles {
+        let marker = if p.id == file.active { "*" } else { " " };
+        let auth = if profile_has_auth(&root, &p.id) {
+            "saved"
+        } else {
+            "-"
+        };
+        let _ = writeln!(
+            out,
+            "{marker:<2} {id:<16} {name:<20} {email:<32} {server}  ({auth})",
+            id = p.id,
+            name = p.name,
+            email = if p.email.is_empty() { "-" } else { &p.email },
+            server = if p.server_url.is_empty() {
+                "-"
+            } else {
+                &p.server_url
+            },
+        );
+    }
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {

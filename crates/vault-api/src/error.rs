@@ -4,8 +4,8 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("{}", format_http(.0))]
+    Http(reqwest::Error),
     #[error("API error ({status}): {message}")]
     Api { status: u16, message: String },
     #[error("two-factor authentication required")]
@@ -23,4 +23,68 @@ pub enum ApiError {
     NotAuthenticated,
     #[error("{0}")]
     Other(String),
+}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::Http(err)
+    }
+}
+
+fn format_http(err: &reqwest::Error) -> String {
+    // Prefer a short host:port label so TUI error rows stay readable.
+    let target = err
+        .url()
+        .map(|u| {
+            let host = u.host_str().unwrap_or("server");
+            match u.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_string(),
+            }
+        })
+        .or_else(|| {
+            // reqwest sometimes omits url() on connect failures; parse from Display.
+            let msg = err.to_string();
+            msg.split("://")
+                .nth(1)
+                .and_then(|rest| rest.split(['/', ')', ' ']).next())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "server".into());
+
+    let chain = {
+        let mut parts = Vec::new();
+        let mut src: Option<&(dyn std::error::Error + 'static)> = Some(err);
+        while let Some(e) = src {
+            parts.push(e.to_string());
+            src = e.source();
+        }
+        parts.join(" | ")
+    };
+    let chain_l = chain.to_ascii_lowercase();
+
+    if chain_l.contains("unknownissuer")
+        || chain_l.contains("unknown issuer")
+        || chain_l.contains("certificate")
+        || chain_l.contains("cert")
+    {
+        return format!("TLS certificate error for {target} (incomplete chain?)");
+    }
+    if err.is_timeout() {
+        return format!("timed out reaching {target}");
+    }
+    if err.is_connect() {
+        return format!("cannot connect to {target}");
+    }
+    if err.is_request() || err.is_builder() {
+        return format!("bad request to {target}");
+    }
+    let msg = err.to_string();
+    if let Some(rest) = msg
+        .strip_prefix("error sending request for url ")
+        .and_then(|s| s.split_once(": ").map(|(_, r)| r))
+    {
+        return format!("{target}: {rest}");
+    }
+    format!("{target}: {msg}")
 }

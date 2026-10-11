@@ -3,9 +3,11 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{
-    App, ClipboardKind, EditField, FocusPane, LoginField, Overlay, PendingAction, Screen,
+    App, ClipboardKind, EditField, FocusPane, LoginField, Overlay, PendingAction, ProfileEditField,
+    ProfileManagerMode, Screen,
 };
 use crate::debug_log;
+use crate::profiles::format_auto_lock_input;
 
 /// True for printable typing (letters, digits, punctuation), including Shift.
 /// Rejects Control/Alt/Super chords used as shortcuts.
@@ -78,6 +80,14 @@ async fn handle_key(
             }
             _ => {}
         }
+        return false;
+    }
+
+    if key.code == KeyCode::Char('p')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(app.overlay, Overlay::None)
+    {
+        app.open_profile_manager();
         return false;
     }
 
@@ -281,6 +291,10 @@ async fn handle_unlock(app: &mut App, key: KeyEvent) -> bool {
             app.show_password = !app.show_password;
             false
         }
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.sign_out_current_profile();
+            false
+        }
         KeyCode::Char('?') if is_typing(&key) => {
             app.show_help = true;
             false
@@ -472,6 +486,300 @@ async fn handle_overlay(app: &mut App, key: KeyEvent) -> bool {
         Overlay::Generator { .. } => handle_generator(app, key),
         Overlay::FolderForm { .. } => handle_folder_form(app, key).await,
         Overlay::ConfirmDelete { .. } => handle_confirm_delete(app, key).await,
+        Overlay::ProfileManager { .. } => handle_profile_manager(app, key).await,
+    }
+}
+
+async fn handle_profile_manager(app: &mut App, key: KeyEvent) -> bool {
+    let mode_is_list = matches!(
+        &app.overlay,
+        Overlay::ProfileManager {
+            mode: ProfileManagerMode::List,
+            ..
+        }
+    );
+    if mode_is_list {
+        return handle_profile_list(app, key).await;
+    }
+    match &app.overlay {
+        Overlay::ProfileManager {
+            mode: ProfileManagerMode::Create { .. },
+            ..
+        } => handle_profile_create(app, key).await,
+        Overlay::ProfileManager {
+            mode: ProfileManagerMode::Edit { .. },
+            ..
+        } => handle_profile_edit(app, key),
+        Overlay::ProfileManager {
+            mode: ProfileManagerMode::ConfirmDelete { .. },
+            ..
+        } => handle_profile_confirm_delete(app, key).await,
+        _ => false,
+    }
+}
+
+async fn handle_profile_list(app: &mut App, key: KeyEvent) -> bool {
+    let len = app.profiles.profiles.len();
+    match key.code {
+        KeyCode::Esc => {
+            app.close_overlay();
+            false
+        }
+        KeyCode::Char('j') | KeyCode::Down if is_typing(&key) || key.code == KeyCode::Down => {
+            if let Overlay::ProfileManager { selected, .. } = &mut app.overlay {
+                if len > 0 {
+                    *selected = (*selected + 1) % len;
+                }
+            }
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up if is_typing(&key) || key.code == KeyCode::Up => {
+            if let Overlay::ProfileManager { selected, .. } = &mut app.overlay {
+                if len > 0 {
+                    *selected = if *selected == 0 { len - 1 } else { *selected - 1 };
+                }
+            }
+            false
+        }
+        KeyCode::Enter => {
+            let id = match &app.overlay {
+                Overlay::ProfileManager { selected, .. } => app
+                    .profiles
+                    .profiles
+                    .get(*selected)
+                    .map(|p| p.id.clone()),
+                _ => None,
+            };
+            if let Some(id) = id {
+                app.switch_to_profile(&id).await;
+            }
+            false
+        }
+        KeyCode::Char('n') if is_typing(&key) => {
+            let selected = match &app.overlay {
+                Overlay::ProfileManager { selected, .. } => *selected,
+                _ => 0,
+            };
+            app.overlay = Overlay::ProfileManager {
+                selected,
+                mode: ProfileManagerMode::Create {
+                    name: String::new(),
+                    error: None,
+                },
+            };
+            false
+        }
+        KeyCode::Char('e') if is_typing(&key) => {
+            let selected = match &app.overlay {
+                Overlay::ProfileManager { selected, .. } => *selected,
+                _ => return false,
+            };
+            let Some(p) = app.profiles.profiles.get(selected).cloned() else {
+                return false;
+            };
+            app.overlay = Overlay::ProfileManager {
+                selected,
+                mode: ProfileManagerMode::Edit {
+                    id: p.id,
+                    name: p.name,
+                    server_url: p.server_url,
+                    email: p.email,
+                    auto_lock_input: format_auto_lock_input(p.auto_lock_minutes),
+                    field: ProfileEditField::Name,
+                    error: None,
+                },
+            };
+            false
+        }
+        KeyCode::Char('d') if is_typing(&key) => {
+            let (selected, id, name) = match &app.overlay {
+                Overlay::ProfileManager { selected, .. } => {
+                    let p = app.profiles.profiles.get(*selected);
+                    (
+                        *selected,
+                        p.map(|p| p.id.clone()).unwrap_or_default(),
+                        p.map(|p| p.name.clone()).unwrap_or_default(),
+                    )
+                }
+                _ => return false,
+            };
+            if !id.is_empty() {
+                app.overlay = Overlay::ProfileManager {
+                    selected,
+                    mode: ProfileManagerMode::ConfirmDelete { id, name },
+                };
+            }
+            false
+        }
+        KeyCode::Char('L') if is_typing(&key) => {
+            app.toggle_lock_on_profile_switch();
+            false
+        }
+        _ => false,
+    }
+}
+
+fn handle_profile_edit(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            if let Overlay::ProfileManager { selected, .. } = &app.overlay {
+                let selected = *selected;
+                app.overlay = Overlay::ProfileManager {
+                    selected,
+                    mode: ProfileManagerMode::List,
+                };
+            }
+            false
+        }
+        KeyCode::Enter => {
+            app.profile_manager_edit_save();
+            false
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            if let Overlay::ProfileManager {
+                mode: ProfileManagerMode::Edit { field, .. },
+                ..
+            } = &mut app.overlay
+            {
+                *field = field.next();
+            }
+            false
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Overlay::ProfileManager {
+                mode: ProfileManagerMode::Edit { field, .. },
+                ..
+            } = &mut app.overlay
+            {
+                *field = field.prev();
+            }
+            false
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::ProfileManager {
+                mode:
+                    ProfileManagerMode::Edit {
+                        name,
+                        server_url,
+                        email,
+                        auto_lock_input,
+                        field,
+                        error,
+                        ..
+                    },
+                ..
+            } = &mut app.overlay
+            {
+                match field {
+                    ProfileEditField::Name => {
+                        name.pop();
+                    }
+                    ProfileEditField::Server => {
+                        server_url.pop();
+                    }
+                    ProfileEditField::Email => {
+                        email.pop();
+                    }
+                    ProfileEditField::AutoLock => {
+                        auto_lock_input.pop();
+                    }
+                }
+                *error = None;
+            }
+            false
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::ProfileManager {
+                mode:
+                    ProfileManagerMode::Edit {
+                        name,
+                        server_url,
+                        email,
+                        auto_lock_input,
+                        field,
+                        error,
+                        ..
+                    },
+                ..
+            } = &mut app.overlay
+            {
+                match field {
+                    ProfileEditField::Name => push_char(name, c),
+                    ProfileEditField::Server => push_char(server_url, c),
+                    ProfileEditField::Email => push_char(email, c),
+                    ProfileEditField::AutoLock => {
+                        if c.is_ascii_alphanumeric() {
+                            push_char(auto_lock_input, c.to_ascii_lowercase());
+                        }
+                    }
+                }
+                *error = None;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+async fn handle_profile_create(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            if let Overlay::ProfileManager { selected, .. } = &app.overlay {
+                let selected = *selected;
+                app.overlay = Overlay::ProfileManager {
+                    selected,
+                    mode: ProfileManagerMode::List,
+                };
+            }
+            false
+        }
+        KeyCode::Enter => {
+            app.profile_manager_create_save().await;
+            false
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::ProfileManager {
+                mode: ProfileManagerMode::Create { name, error, .. },
+                ..
+            } = &mut app.overlay
+            {
+                name.pop();
+                *error = None;
+            }
+            false
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::ProfileManager {
+                mode: ProfileManagerMode::Create { name, error, .. },
+                ..
+            } = &mut app.overlay
+            {
+                push_char(name, c);
+                *error = None;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+async fn handle_profile_confirm_delete(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            if let Overlay::ProfileManager { selected, .. } = &app.overlay {
+                let selected = *selected;
+                app.overlay = Overlay::ProfileManager {
+                    selected,
+                    mode: ProfileManagerMode::List,
+                };
+            }
+            false
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.profile_manager_confirm_delete().await;
+            false
+        }
+        _ => false,
     }
 }
 

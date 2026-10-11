@@ -4,6 +4,7 @@ mod help;
 mod layout;
 mod login;
 mod modals;
+mod profiles;
 mod vault;
 
 use ratatui::Frame;

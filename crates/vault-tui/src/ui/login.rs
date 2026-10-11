@@ -38,7 +38,7 @@ pub fn draw_login(frame: &mut Frame, app: &App) {
 
     draw_brand(frame, chunks[0], "Sign in");
 
-    let form = center_fixed(56, 16, chunks[1]);
+    let form = center_fixed(60, 18, chunks[1]);
     let card = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -57,8 +57,7 @@ pub fn draw_login(frame: &mut Frame, app: &App) {
             Constraint::Length(1), // spacer
             Constraint::Length(1), // remember
             Constraint::Length(1), // spacer
-            Constraint::Length(1), // message / busy
-            Constraint::Min(1),
+            Constraint::Min(2),    // message / busy (wrap long errors)
         ])
         .margin(1)
         .split(inner);
@@ -103,7 +102,12 @@ pub fn draw_login(frame: &mut Frame, app: &App) {
         );
     }
 
-    draw_status_bar(frame, status, app, &["Tab fields", "Ctrl+h show", "Ctrl+r remember", "Enter"]);
+    draw_status_bar(
+        frame,
+        status,
+        app,
+        &["Tab fields", "Ctrl+p profiles", "Ctrl+r remember", "Enter"],
+    );
 }
 
 pub fn draw_2fa(frame: &mut Frame, app: &App) {
@@ -241,7 +245,12 @@ pub fn draw_unlock(frame: &mut Frame, app: &App) {
         draw_message(frame, rows[5], MessageKind::Hint, "Enter your master password");
     }
 
-    draw_status_bar(frame, status, app, &["Ctrl+h show", "Enter unlock", "Esc quit"]);
+    draw_status_bar(
+        frame,
+        status,
+        app,
+        &["Ctrl+h show", "Ctrl+p profiles", "Ctrl+o signout", "Enter"],
+    );
 }
 
 fn draw_brand(frame: &mut Frame, area: Rect, subtitle: &str) {
@@ -450,8 +459,9 @@ pub fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App, hints: &[&str])
     right.push(Span::styled(" ", Style::default().bg(STATUS_BG)));
     let right_w: usize = right.iter().map(|s| s.content.chars().count()).sum();
 
-    // Badge + screen always shown; status text fills remaining space and truncates.
-    let prefix = format!("{mode} {screen} ");
+    let profile = app.active_profile_name();
+    // Badge + screen + profile always shown; status text fills remaining space and truncates.
+    let prefix = format!("{mode} {screen} · {profile} ");
     let status_budget = (area.width as usize).saturating_sub(prefix.chars().count() + right_w + 1);
     let status = truncate_str(&app.status, status_budget);
 
@@ -464,7 +474,7 @@ pub fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App, hints: &[&str])
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" {screen} "),
+            format!(" {screen} · {profile} "),
             Style::default().fg(MUTED).bg(STATUS_BG),
         ),
         Span::styled(

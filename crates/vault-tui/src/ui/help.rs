@@ -14,7 +14,7 @@ const FG: Color = Color::White;
 
 pub fn draw_help(frame: &mut Frame) {
     let area = frame.area();
-    let popup = center_fixed(64, 24, area);
+    let popup = center_fixed(64, 27, area);
 
     frame.render_widget(Clear, popup);
 
@@ -39,7 +39,11 @@ pub fn draw_help(frame: &mut Frame) {
 
     let lines = vec![
         bind_line("Ctrl+h", "Show/hide password (login · unlock)"),
-        bind_line("Ctrl+r", "Toggle remember server & email"),
+        bind_line("Ctrl+r", "Toggle remember this profile's session"),
+        bind_line("Ctrl+p", "Profile manager (create · edit · switch)"),
+        bind_line("e", "Edit profile (name · server · email · auto-lock)"),
+        bind_line("L", "Toggle lock-on-switch (in profile manager)"),
+        bind_line("Ctrl+o", "Sign out current profile (unlock)"),
         bind_line("Tab / h l", "Focus panes (folders · items · detail)"),
         bind_line("j / k", "Move selection"),
         bind_line("Enter / e", "Edit login"),

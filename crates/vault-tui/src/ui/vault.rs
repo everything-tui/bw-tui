@@ -386,19 +386,23 @@ fn mask_card(num: &str) -> String {
 }
 
 fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
-    let lock = app
-        .lock_remaining()
-        .map(|d| {
-            let secs = d.as_secs();
-            format!("{:02}:{:02}", secs / 60, secs % 60)
-        })
-        .unwrap_or_else(|| "locked".into());
+    let lock = if app.screen == crate::app::Screen::Vault && app.auto_lock_minutes.is_none() {
+        "off".to_string()
+    } else {
+        app.lock_remaining()
+            .map(|d| {
+                let secs = d.as_secs();
+                format!("{:02}:{:02}", secs / 60, secs % 60)
+            })
+            .unwrap_or_else(|| "locked".into())
+    };
     let clip = app
         .clipboard_remaining()
         .map(|d| format!("clip {}s  ", d.as_secs()))
         .unwrap_or_default();
 
     let mode = if app.using_mock { " MOCK " } else { " LIVE " };
+    let profile = app.active_profile_name();
     let left = vec![
         Span::styled(
             mode,
@@ -407,13 +411,19 @@ fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(
+            format!(" {profile} "),
+            Style::default().fg(MUTED),
+        ),
         Span::styled(format!(" {}", app.status), Style::default().fg(FG)),
     ];
     let right = vec![
         Span::styled(clip, Style::default().fg(FAV)),
         Span::styled("lock ", Style::default().fg(MUTED)),
         Span::styled(lock, Style::default().fg(FG)),
-        Span::styled("  ? ", Style::default().fg(ACCENT)),
+        Span::styled("  Ctrl+p ", Style::default().fg(ACCENT)),
+        Span::styled("profiles ", Style::default().fg(MUTED)),
+        Span::styled("? ", Style::default().fg(ACCENT)),
         Span::styled("help ", Style::default().fg(MUTED)),
     ];
     let used: usize = left

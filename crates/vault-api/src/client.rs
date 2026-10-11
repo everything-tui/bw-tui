@@ -19,11 +19,67 @@ pub struct ClientConfig {
 
 impl ClientConfig {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let raw = base_url.into();
+        let base_url = normalize_server_url(&raw)
+            .unwrap_or_else(|_| raw.trim().trim_end_matches('/').to_string());
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             device_id: Uuid::new_v4().to_string(),
             device_name: "bitwarden-tui".to_string(),
         }
+    }
+}
+
+/// Trim, ensure `http(s)://` scheme, drop trailing slash. Rejects empty / non-http URLs.
+pub fn normalize_server_url(raw: &str) -> Result<String> {
+    let trimmed = raw.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        return Err(ApiError::Url("server URL is required".into()));
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed
+    } else {
+        format!("https://{trimmed}")
+    };
+    let parsed = url::Url::parse(&with_scheme)
+        .map_err(|e| ApiError::Url(format!("invalid server URL: {e}")))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(ApiError::Url(format!(
+                "server URL must be http or https (got {other})"
+            )));
+        }
+    }
+    if parsed.host_str().is_none() {
+        return Err(ApiError::Url("server URL is missing a host".into()));
+    }
+    // Keep path if the user intentionally set one (unusual); drop only trailing slash.
+    let mut out = with_scheme;
+    while out.ends_with('/') {
+        out.pop();
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_bare_host_to_https() {
+        assert_eq!(
+            normalize_server_url("vault.example.com").unwrap(),
+            "https://vault.example.com"
+        );
+    }
+
+    #[test]
+    fn keeps_http_and_strips_slash() {
+        assert_eq!(
+            normalize_server_url("http://127.0.0.1:8080/").unwrap(),
+            "http://127.0.0.1:8080"
+        );
     }
 }
 

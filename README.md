@@ -21,12 +21,41 @@ Binary: `target/release/bitwarden-tui`
 
 2. Sign in with your Vaultwarden email and master password when prompted.
 
-Environment overrides (when supported by the CLI):
+### Named profiles
+
+Use named profiles (e.g. `work`, `home`) so each account has its own server, email, and remembered session:
+
+```bash
+./target/release/bitwarden-tui --profile work
+./target/release/bitwarden-tui --list-profiles
+```
+
+In the TUI, press **Ctrl+p** to create, edit, delete, or switch profiles. On the unlock screen, **Ctrl+o** signs out of the current profile only (other profiles keep their saved sessions).
+
+By default, switching profiles **keeps unlocked vaults in memory** (parked) so you can switch back without re-entering the master password. Auto-lock timers keep running on parked profiles. Press **`L`** in the profile manager to toggle **lock-on-switch** (when on, leaving a profile locks and drops its session).
+
+Each profile has its own **auto-lock** idle timeout (default **15 minutes**). Press **`e`** in the profile manager to edit name, server URL, email, and auto-lock (`1`–`1440` minutes, or `off` / `0`). The vault status bar shows `lock MM:SS` or `lock off`. Open (parked or active) vaults show an **open** badge in the list.
+
+Environment overrides:
 
 | Variable | Purpose |
 | --- | --- |
-| `VAULTWARDEN_URL` | Server base URL (default for E2E: `http://127.0.0.1:8080`) |
+| `BW_SERVER` | Server base URL |
+| `BW_EMAIL` | Account email |
+| `BW_PROFILE` | Active profile id |
+| `VAULTWARDEN_URL` | Used by E2E scripts (not the CLI); default `http://127.0.0.1:8080` |
 | `E2E_EMAIL` / `E2E_PASSWORD` | Integration test credentials |
+
+### On-disk layout
+
+Under the app data directory (`~/Library/Application Support/com.bitwarden-tui.bitwarden-tui/` on macOS, `~/.local/share/bitwarden-tui/` on Linux):
+
+```text
+profiles.json                 # registry + active profile
+profiles/<id>/auth.json       # refresh token for that profile (if remembered)
+```
+
+Older installs with a flat `login.json` / `auth.json` are migrated once into profile `default`.
 
 ## Keybindings (summary)
 
@@ -40,6 +69,10 @@ Environment overrides (when supported by the CLI):
 | `g` | Password generator |
 | `Ctrl+s` | Sync vault |
 | `Ctrl+l` | Lock |
+| `Ctrl+p` | Profile manager |
+| `e` | Edit selected profile (in profile manager) |
+| `L` | Toggle lock-on-switch (in profile manager) |
+| `Ctrl+o` | Sign out current profile (unlock) |
 | `Ctrl+n` | New folder |
 | `?` | Help |
 | `q` | Quit |
@@ -49,7 +82,7 @@ Press `?` in the app for the full map. Use `--mock` for UI-only demos without a 
 ## Security notes
 
 - Master passwords and decrypted secrets stay in process memory only for the session; quit the app when finished.
-- “Remember server & email” stores the server URL, email (`login.json`), and a refresh token (`auth.json`) so the next launch opens the unlock screen. The master password is never written to disk.
+- “Remember” stores the profile’s server URL, email (`profiles.json`), and a refresh token (`profiles/<id>/auth.json`) so the next launch opens the unlock screen. The master password is never written to disk.
 - Prefer HTTPS and a trusted Vaultwarden instance in production. The Docker Compose stack is **dev/test only** (`SIGNUPS_ALLOWED=true`, fixed `ADMIN_TOKEN`).
 - Never commit `.env`, admin tokens, or vault data volumes.
 - Clipboard copies may linger in the system clipboard; clear them after use if on a shared machine.

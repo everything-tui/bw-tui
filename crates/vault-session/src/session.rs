@@ -1,7 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use directories::ProjectDirs;
 use totp_rs::{Algorithm, Secret, TOTP};
 use vault_api::{
     CipherLogin, CipherRequest, CipherSecureNote, ClientConfig, LoginUri, RegisterKeys,
@@ -17,6 +16,7 @@ use crate::clipboard::ClipboardService;
 use crate::decrypt::build_index;
 use crate::error::{Result, SessionError};
 use crate::models::*;
+use crate::paths::app_data_dir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
@@ -42,17 +42,21 @@ pub struct Session {
     index: VaultIndex,
     status: SessionStatus,
     last_activity: Instant,
-    auto_lock: Duration,
+    /// `None` disables idle auto-lock.
+    auto_lock: Option<Duration>,
     pub clipboard: ClipboardService,
     data_dir: PathBuf,
 }
 
 impl Session {
+    /// Create a session using the default app data directory (legacy / tests).
     pub fn new(server_url: &str) -> Result<Self> {
+        Self::with_data_dir(server_url, app_data_dir())
+    }
+
+    /// Create a session that persists auth under `data_dir` (typically a profile directory).
+    pub fn with_data_dir(server_url: &str, data_dir: PathBuf) -> Result<Self> {
         let client = VaultClient::new(ClientConfig::new(server_url))?;
-        let data_dir = ProjectDirs::from("com", "bitwarden-tui", "bitwarden-tui")
-            .map(|p| p.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".bitwarden-tui"));
         let _ = std::fs::create_dir_all(&data_dir);
         Ok(Self {
             client,
@@ -65,10 +69,14 @@ impl Session {
             index: VaultIndex::default(),
             status: SessionStatus::LoggedOut,
             last_activity: Instant::now(),
-            auto_lock: Duration::from_secs(15 * 60),
+            auto_lock: Some(Duration::from_secs(15 * 60)),
             clipboard: ClipboardService::new(30),
             data_dir,
         })
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     fn user_id(&self) -> Result<&str> {
@@ -93,8 +101,9 @@ impl Session {
         &self.index
     }
 
-    pub fn set_auto_lock_secs(&mut self, secs: u64) {
-        self.auto_lock = Duration::from_secs(secs);
+    /// Set idle auto-lock timeout in minutes. `None` disables auto-lock.
+    pub fn set_auto_lock(&mut self, minutes: Option<u64>) {
+        self.auto_lock = minutes.map(|m| Duration::from_secs(m.saturating_mul(60)));
     }
 
     pub fn touch(&mut self) {
@@ -105,18 +114,16 @@ impl Session {
         if self.status != SessionStatus::Unlocked {
             return None;
         }
-        Some(
-            self.auto_lock
-                .saturating_sub(self.last_activity.elapsed()),
-        )
+        let timeout = self.auto_lock?;
+        Some(timeout.saturating_sub(self.last_activity.elapsed()))
     }
 
     pub fn tick(&mut self) {
         self.clipboard.tick();
-        if self.status == SessionStatus::Unlocked
-            && self.last_activity.elapsed() >= self.auto_lock
-        {
-            self.lock();
+        if let Some(timeout) = self.auto_lock {
+            if self.status == SessionStatus::Unlocked && self.last_activity.elapsed() >= timeout {
+                self.lock();
+            }
         }
     }
 
@@ -522,6 +529,7 @@ impl Session {
             protected_key: self.protected_key.clone(),
             private_key: self.private_key_enc.clone(),
         };
+        let _ = std::fs::create_dir_all(&self.data_dir);
         let path = self.data_dir.join("auth.json");
         let json = serde_json::to_string_pretty(&auth)
             .map_err(|e| SessionError::Other(e.to_string()))?;
@@ -529,21 +537,15 @@ impl Session {
         Ok(())
     }
 
-    fn auth_data_dir() -> PathBuf {
-        ProjectDirs::from("com", "bitwarden-tui", "bitwarden-tui")
-            .map(|p| p.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".bitwarden-tui"))
-    }
-
-    /// Remove persisted refresh-token session (`auth.json`).
-    pub fn clear_persisted_auth() {
-        let path = Self::auth_data_dir().join("auth.json");
+    /// Remove persisted refresh-token session (`auth.json`) under `data_dir`.
+    pub fn clear_persisted_auth(data_dir: &Path) {
+        let path = data_dir.join("auth.json");
         let _ = std::fs::remove_file(path);
     }
 
-    /// Restore a locked session from `auth.json` if the server URL matches.
-    pub async fn try_restore(server_url: &str) -> Result<Option<Self>> {
-        let Some((session, stored_server)) = Self::try_restore_inner().await? else {
+    /// Restore a locked session from `auth.json` in `data_dir` if the server URL matches.
+    pub async fn try_restore(server_url: &str, data_dir: PathBuf) -> Result<Option<Self>> {
+        let Some((session, stored_server)) = Self::try_restore_inner(data_dir).await? else {
             return Ok(None);
         };
         if stored_server.trim_end_matches('/') != server_url.trim_end_matches('/') {
@@ -552,13 +554,12 @@ impl Session {
         Ok(Some(session))
     }
 
-    /// Restore a locked session from whatever server is stored in `auth.json`.
-    pub async fn try_restore_saved() -> Result<Option<Self>> {
-        Ok(Self::try_restore_inner().await?.map(|(s, _)| s))
+    /// Restore a locked session from whatever server is stored in `data_dir/auth.json`.
+    pub async fn try_restore_saved(data_dir: PathBuf) -> Result<Option<Self>> {
+        Ok(Self::try_restore_inner(data_dir).await?.map(|(s, _)| s))
     }
 
-    async fn try_restore_inner() -> Result<Option<(Self, String)>> {
-        let data_dir = Self::auth_data_dir();
+    async fn try_restore_inner(data_dir: PathBuf) -> Result<Option<(Self, String)>> {
         let path = data_dir.join("auth.json");
         if !path.exists() {
             return Ok(None);
@@ -589,7 +590,7 @@ impl Session {
             index: VaultIndex::default(),
             status: SessionStatus::Locked,
             last_activity: Instant::now(),
-            auto_lock: Duration::from_secs(15 * 60),
+            auto_lock: Some(Duration::from_secs(15 * 60)),
             clipboard: ClipboardService::new(30),
             data_dir,
         };
@@ -604,7 +605,7 @@ impl Session {
         self.protected_key = None;
         self.private_key_enc = None;
         self.status = SessionStatus::LoggedOut;
-        Self::clear_persisted_auth();
+        Self::clear_persisted_auth(&self.data_dir);
     }
 }
 
@@ -680,4 +681,71 @@ fn totp_code(secret_or_uri: &str) -> Result<String> {
     };
     totp.generate_current()
         .map_err(|e| SessionError::Other(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::PersistedAuth;
+
+    fn write_dummy_auth(dir: &Path) {
+        let auth = PersistedAuth {
+            server_url: "http://127.0.0.1:8080".into(),
+            email: "a@b.c".into(),
+            refresh_token: "tok".into(),
+            device_id: "dev".into(),
+            protected_key: None,
+            private_key: None,
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::to_string_pretty(&auth).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn with_data_dir_uses_given_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("profiles/work");
+        let session = Session::with_data_dir("http://127.0.0.1:8080", dir.clone()).unwrap();
+        assert_eq!(session.data_dir(), dir.as_path());
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn clear_persisted_auth_only_touches_given_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        write_dummy_auth(&a);
+        write_dummy_auth(&b);
+        Session::clear_persisted_auth(&a);
+        assert!(!a.join("auth.json").exists());
+        assert!(b.join("auth.json").exists());
+    }
+
+    #[test]
+    fn logout_clears_only_session_auth_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        write_dummy_auth(&a);
+        write_dummy_auth(&b);
+        let mut session = Session::with_data_dir("http://127.0.0.1:8080", a.clone()).unwrap();
+        session.logout();
+        assert!(!a.join("auth.json").exists());
+        assert!(b.join("auth.json").exists());
+        assert_eq!(session.status(), SessionStatus::LoggedOut);
+    }
+
+    #[tokio::test]
+    async fn try_restore_saved_none_without_auth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let restored = Session::try_restore_saved(dir).await.unwrap();
+        assert!(restored.is_none());
+    }
 }

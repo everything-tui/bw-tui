@@ -1,14 +1,24 @@
 //! Application state machine for the Vaultwarden TUI.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use vault_session::{generate_password, LoginDraft, LoginResult, Session, SessionStatus};
+use vault_session::{
+    app_data_dir, generate_password, normalize_server_url, profile_dir, LoginDraft, LoginResult,
+    Session, SessionStatus,
+};
 use zeroize::Zeroize;
 
 use crate::mock::{sample_folders, sample_items, with_folder_counts};
 use crate::models::{DecryptedItem, FilterKind, FolderView, ItemType, SidebarEntry};
+use crate::profiles::{
+    allocate_profile_id, create_profile, delete_profile, load_registry_from, parse_auto_lock_input,
+    profile_has_auth, set_active, set_lock_on_profile_switch, update_profile,
+    update_profile_credentials, ProfilesFile, VaultProfile,
+};
 
 /// High-level screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +91,68 @@ pub enum ClipboardKind {
     Uri,
 }
 
+/// Focused field in the profile edit dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileEditField {
+    Name,
+    Server,
+    Email,
+    AutoLock,
+}
+
+impl ProfileEditField {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Server,
+            Self::Server => Self::Email,
+            Self::Email => Self::AutoLock,
+            Self::AutoLock => Self::Name,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Name => Self::AutoLock,
+            Self::Server => Self::Name,
+            Self::Email => Self::Server,
+            Self::AutoLock => Self::Email,
+        }
+    }
+}
+
+/// Sub-mode of the profile manager overlay.
+#[derive(Debug, Clone)]
+pub enum ProfileManagerMode {
+    List,
+    Create {
+        name: String,
+        error: Option<String>,
+    },
+    Edit {
+        id: String,
+        name: String,
+        server_url: String,
+        email: String,
+        /// Same parse rules as today: off/0/empty → None; 1..=1440 → Some
+        auto_lock_input: String,
+        field: ProfileEditField,
+        error: Option<String>,
+    },
+    ConfirmDelete {
+        id: String,
+        name: String,
+    },
+}
+
+/// Parked mock vault snapshot for a background profile.
+#[derive(Debug, Clone)]
+struct MockParked {
+    folders: Vec<FolderView>,
+    items: Vec<DecryptedItem>,
+    last_activity: Instant,
+    auto_lock_minutes: Option<u64>,
+}
+
 /// Modal overlays on top of the vault (or login) screen.
 #[derive(Debug, Clone)]
 pub enum Overlay {
@@ -112,6 +184,10 @@ pub enum Overlay {
         id: String,
         name: String,
     },
+    ProfileManager {
+        selected: usize,
+        mode: ProfileManagerMode,
+    },
 }
 
 /// Slow auth work queued by a key press so the loop can paint a busy frame before running it.
@@ -122,8 +198,6 @@ pub enum PendingAction {
     Unlock,
 }
 
-/// Auto-lock idle timeout for mock mode.
-const MOCK_LOCK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Clear demo clipboard after this duration.
 const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(30);
 
@@ -133,13 +207,22 @@ pub struct App {
     pub show_help: bool,
     pub overlay: Overlay,
 
+    /// App data root (profile registry lives here).
+    pub data_root: PathBuf,
+    /// In-memory profile registry.
+    pub profiles: ProfilesFile,
+    /// Currently selected profile id (mirrors `profiles.active`).
+    pub active_profile_id: String,
+    /// Effective idle auto-lock for the active profile (`None` = disabled).
+    pub auto_lock_minutes: Option<u64>,
+
     // --- Login / Unlock / 2FA ---
     pub server_url: String,
     pub email: String,
     pub password: String,
     /// When true, show master password characters on login/unlock screens.
     pub show_password: bool,
-    /// When true, save server URL + email after a successful login.
+    /// When true, remember this profile's session after a successful login.
     pub remember_login: bool,
     pub login_field: LoginField,
     pub unlock_password: String,
@@ -173,6 +256,10 @@ pub struct App {
     pub using_mock: bool,
     /// Live session when not in mock mode.
     pub session: Option<Session>,
+    /// Unlocked/locked sessions parked while another profile is active.
+    pub background_sessions: HashMap<String, Session>,
+    /// Mock vault snapshots parked while another profile is active.
+    background_mocks: HashMap<String, MockParked>,
     pub busy: bool,
     pub pending: Option<PendingAction>,
     /// Backup of ItemForm when opening the generator from it.
@@ -180,36 +267,90 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(server: Option<String>, email: Option<String>, mock: bool) -> Self {
-        let saved = if mock {
-            None
+    /// Build the app. Returns `Err` if `--profile` names an unknown profile.
+    pub fn new(
+        profile: Option<String>,
+        server: Option<String>,
+        email: Option<String>,
+        mock: bool,
+    ) -> Result<Self, String> {
+        let (data_root, mut profiles) = if mock {
+            (
+                PathBuf::from(".bitwarden-tui-mock"),
+                ProfilesFile::empty_default(),
+            )
         } else {
-            crate::prefs::load_saved_login()
+            let root = app_data_dir();
+            let file = load_registry_from(&root);
+            (root, file)
         };
+
+        if let Some(ref id) = profile {
+            if profiles.get(id).is_none() {
+                return Err(format!("Unknown profile '{id}'"));
+            }
+            if !mock {
+                set_active(&data_root, &mut profiles, id)?;
+            } else {
+                profiles.active = id.clone();
+            }
+        }
+
+        let active_id = profiles.active.clone();
+        let active = profiles
+            .get(&active_id)
+            .cloned()
+            .unwrap_or_else(|| VaultProfile {
+                id: "default".into(),
+                name: "default".into(),
+                server_url: String::new(),
+                email: String::new(),
+                auto_lock_minutes: Some(15),
+            });
+
         let cli_server = server.filter(|s| !s.is_empty());
         let cli_email = email.filter(|e| !e.is_empty());
         let server_url = cli_server
             .clone()
-            .or_else(|| saved.as_ref().map(|s| s.server_url.clone()))
+            .or_else(|| {
+                if active.server_url.trim().is_empty() {
+                    None
+                } else {
+                    Some(active.server_url.clone())
+                }
+            })
             .unwrap_or_else(|| "http://127.0.0.1:8080".into());
         let email = cli_email
             .clone()
-            .or_else(|| saved.as_ref().map(|s| s.email.clone()))
+            .or_else(|| {
+                if active.email.trim().is_empty() {
+                    None
+                } else {
+                    Some(active.email.clone())
+                }
+            })
             .unwrap_or_default();
-        let remember_login = saved.is_some();
+
+        let has_auth = !mock && profile_has_auth(&data_root, &active_id);
+        let has_creds = !active.server_url.trim().is_empty() || !active.email.trim().is_empty();
+        let remember_login = has_auth || has_creds;
         let has_email = !email.is_empty();
+
+        let auto_lock_minutes = active.auto_lock_minutes;
         let mut app = Self {
             screen: Screen::Login,
             should_quit: false,
             show_help: false,
             overlay: Overlay::None,
+            data_root,
+            profiles,
+            active_profile_id: active_id,
+            auto_lock_minutes,
             server_url,
             email,
             password: String::new(),
             show_password: false,
             remember_login,
-            // Server is prefilled for local Docker; start on Email (or Password
-            // if email was provided on the CLI / prefs) so typing goes to an empty field.
             login_field: if has_email {
                 LoginField::Password
             } else {
@@ -241,6 +382,8 @@ impl App {
             clipboard_demo: None,
             using_mock: mock,
             session: None,
+            background_sessions: HashMap::new(),
+            background_mocks: HashMap::new(),
             busy: false,
             pending: None,
             item_form_backup: None,
@@ -248,7 +391,142 @@ impl App {
         if !app.email.is_empty() {
             app.login_field = LoginField::Password;
         }
-        app
+        Ok(app)
+    }
+
+    pub fn profile_data_dir(&self) -> PathBuf {
+        profile_dir(&self.data_root, &self.active_profile_id)
+    }
+
+    pub fn active_profile_name(&self) -> &str {
+        self.profiles
+            .get(&self.active_profile_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or(self.active_profile_id.as_str())
+    }
+
+    pub fn apply_auto_lock_from_profile(&mut self) {
+        let minutes = self
+            .profiles
+            .get(&self.active_profile_id)
+            .and_then(|p| p.auto_lock_minutes);
+        self.auto_lock_minutes = minutes;
+        if let Some(session) = self.session.as_mut() {
+            session.set_auto_lock(minutes);
+        }
+    }
+
+    /// Whether a profile currently has an unlocked vault in memory.
+    pub fn profile_is_open(&self, id: &str) -> bool {
+        if id == self.active_profile_id {
+            return self.screen == Screen::Vault;
+        }
+        if self.background_mocks.contains_key(id) {
+            return true;
+        }
+        self.background_sessions
+            .get(id)
+            .is_some_and(|s| s.status() == SessionStatus::Unlocked)
+    }
+
+    pub fn open_profile_manager(&mut self) {
+        let selected = self
+            .profiles
+            .profiles
+            .iter()
+            .position(|p| p.id == self.active_profile_id)
+            .unwrap_or(0);
+        self.overlay = Overlay::ProfileManager {
+            selected,
+            mode: ProfileManagerMode::List,
+        };
+    }
+
+    /// Toggle global lock-on-switch. Enabling clears all parked sessions.
+    pub fn toggle_lock_on_profile_switch(&mut self) {
+        let enabled = !self.profiles.lock_on_profile_switch;
+        if self.using_mock {
+            self.profiles.lock_on_profile_switch = enabled;
+        } else if let Err(e) =
+            set_lock_on_profile_switch(&self.data_root, &mut self.profiles, enabled)
+        {
+            self.set_status(e);
+            return;
+        }
+        if enabled {
+            self.clear_background_sessions();
+        }
+        self.set_status(if enabled {
+            "Lock on profile switch: on"
+        } else {
+            "Lock on profile switch: off"
+        });
+    }
+
+    fn clear_background_sessions(&mut self) {
+        for (_, mut session) in self.background_sessions.drain() {
+            session.lock();
+        }
+        self.background_mocks.clear();
+    }
+
+    fn park_outgoing_profile(&mut self, outgoing_id: &str) {
+        if outgoing_id.is_empty() {
+            if let Some(mut session) = self.session.take() {
+                session.lock();
+            }
+            return;
+        }
+        let lock_on_switch = self.profiles.lock_on_profile_switch;
+        if self.using_mock {
+            if lock_on_switch {
+                self.background_mocks.remove(outgoing_id);
+            } else if self.screen == Screen::Vault && !self.items.is_empty() {
+                self.background_mocks.insert(
+                    outgoing_id.to_string(),
+                    MockParked {
+                        folders: std::mem::take(&mut self.folders),
+                        items: std::mem::take(&mut self.items),
+                        last_activity: self.last_activity,
+                        auto_lock_minutes: self.auto_lock_minutes,
+                    },
+                );
+            }
+            return;
+        }
+
+        if let Some(mut session) = self.session.take() {
+            if lock_on_switch {
+                session.lock();
+            } else {
+                self.background_sessions
+                    .insert(outgoing_id.to_string(), session);
+            }
+        }
+    }
+
+    fn mock_parked_still_open(parked: &MockParked) -> bool {
+        match parked.auto_lock_minutes {
+            None => true,
+            Some(mins) => {
+                let timeout = Duration::from_secs(mins.saturating_mul(60));
+                parked.last_activity.elapsed() < timeout
+            }
+        }
+    }
+
+    fn restore_mock_parked(&mut self, parked: MockParked) {
+        self.folders = parked.folders;
+        self.items = parked.items;
+        self.last_activity = parked.last_activity;
+        self.auto_lock_minutes = parked.auto_lock_minutes;
+        self.rebuild_sidebar();
+        self.recompute_visible();
+        self.selected_sidebar = 0;
+        self.selected_item = 0;
+        self.focus = FocusPane::Items;
+        self.screen = Screen::Vault;
+        self.locked_at = None;
     }
 
     // -------------------------------------------------------------------------
@@ -272,10 +550,6 @@ impl App {
 
     pub async fn submit_login(&mut self) {
         self.form_error = None;
-        if self.server_url.trim().is_empty() {
-            self.form_error = Some("Server URL is required".into());
-            return;
-        }
         if self.email.trim().is_empty() {
             self.form_error = Some("Email is required".into());
             return;
@@ -285,22 +559,42 @@ impl App {
             return;
         }
 
+        let server = match normalize_server_url(&self.server_url) {
+            Ok(s) => s,
+            Err(e) => {
+                self.form_error = Some(e.to_string());
+                return;
+            }
+        };
+        // Reflect normalized URL in the form (e.g. added https://).
+        self.server_url = server.clone();
+
         if self.using_mock {
             self.password.zeroize();
             self.load_mock_vault();
+            self.apply_auto_lock_from_profile();
             self.screen = Screen::Vault;
             self.set_status("Logged in (mock vault)");
             self.touch();
             return;
         }
 
-        self.busy = true;
-        self.set_status("Logging in…");
-        let server = self.server_url.trim().to_string();
+        // Persist typed server/email on the active profile even if auth fails,
+        // so switching away and back doesn't wipe what the user entered.
         let email = self.email.trim().to_string();
+        let _ = update_profile_credentials(
+            &self.data_root,
+            &mut self.profiles,
+            &self.active_profile_id,
+            &server,
+            &email,
+        );
+
+        self.busy = true;
+        self.set_status(format!("Logging in to {server}…"));
         let password = self.password.clone();
 
-        let mut session = match Session::new(&server) {
+        let mut session = match Session::with_data_dir(&server, self.profile_data_dir()) {
             Ok(s) => s,
             Err(e) => {
                 self.busy = false;
@@ -315,6 +609,7 @@ impl App {
                 self.password.zeroize();
                 self.persist_login_prefs(&server, &email);
                 self.session = Some(session);
+                self.apply_auto_lock_from_profile();
                 self.reload_from_session();
                 self.screen = Screen::Vault;
                 self.locked_at = None;
@@ -323,6 +618,7 @@ impl App {
             }
             Ok(LoginResult::TwoFactorRequired { providers }) => {
                 self.session = Some(session);
+                self.apply_auto_lock_from_profile();
                 self.two_factor_providers = providers;
                 self.totp_code.clear();
                 self.screen = Screen::TwoFactor;
@@ -336,13 +632,28 @@ impl App {
         self.busy = false;
     }
 
-    fn persist_login_prefs(&self, server: &str, email: &str) {
+    fn persist_login_prefs(&mut self, server: &str, email: &str) {
+        if self.using_mock {
+            return;
+        }
         if self.remember_login {
-            let _ = crate::prefs::save_login(server, email);
+            let _ = update_profile_credentials(
+                &self.data_root,
+                &mut self.profiles,
+                &self.active_profile_id,
+                server,
+                email,
+            );
             // Session already wrote auth.json during login; keep it for next launch.
         } else {
-            crate::prefs::clear_saved_login();
-            Session::clear_persisted_auth();
+            Session::clear_persisted_auth(&self.profile_data_dir());
+            let _ = update_profile_credentials(
+                &self.data_root,
+                &mut self.profiles,
+                &self.active_profile_id,
+                server,
+                email,
+            );
         }
     }
 
@@ -353,13 +664,14 @@ impl App {
             return;
         }
         self.set_status("Restoring session…");
-        match Session::try_restore_saved().await {
+        match Session::try_restore_saved(self.profile_data_dir()).await {
             Ok(Some(session)) => {
                 if let Some(email) = session.email() {
                     self.email = email.to_string();
                 }
                 self.server_url = session.server_url().to_string();
                 self.session = Some(session);
+                self.apply_auto_lock_from_profile();
                 self.screen = Screen::Unlock;
                 self.locked_at = Some(Instant::now());
                 self.set_status("Session restored — enter master password");
@@ -371,6 +683,397 @@ impl App {
             Err(_) => {
                 self.set_status("Ready — press ? for help");
             }
+        }
+    }
+
+    /// Switch to another named profile (keeps other profiles' auth.json intact).
+    pub async fn switch_to_profile(&mut self, id: &str) {
+        if id == self.active_profile_id {
+            self.overlay = Overlay::None;
+            return;
+        }
+        if self.profiles.get(id).is_none() {
+            self.set_status(format!("Unknown profile '{id}'"));
+            return;
+        }
+
+        self.password.zeroize();
+        self.unlock_password.zeroize();
+        self.totp_code.clear();
+        self.form_error = None;
+        self.searching = false;
+        self.search_query.clear();
+        self.show_help = false;
+        self.overlay = Overlay::None;
+        if let Some(mut s) = self.clipboard_demo.take() {
+            s.zeroize();
+        }
+        self.clipboard_clear_at = None;
+        self.clipboard_kind = None;
+
+        let outgoing = self.active_profile_id.clone();
+        self.park_outgoing_profile(&outgoing);
+
+        self.items.clear();
+        self.folders.clear();
+        self.sidebar.clear();
+        self.visible.clear();
+        self.selected_sidebar = 0;
+        self.selected_item = 0;
+        self.session = None;
+
+        if !self.using_mock {
+            if let Err(e) = set_active(&self.data_root, &mut self.profiles, id) {
+                self.set_status(e);
+                return;
+            }
+        } else {
+            self.profiles.active = id.to_string();
+        }
+        self.active_profile_id = id.to_string();
+
+        // Keep the current server URL when the target profile has none yet
+        // (new profiles inherit the previous URL instead of resetting to localhost).
+        if let Some(p) = self.profiles.get(id) {
+            if !p.server_url.trim().is_empty() {
+                self.server_url = p.server_url.clone();
+            } else if self.server_url.trim().is_empty() {
+                self.server_url = "http://127.0.0.1:8080".into();
+            }
+            self.email = p.email.clone();
+        }
+
+        let name = self.active_profile_name().to_string();
+        self.apply_auto_lock_from_profile();
+
+        if self.using_mock {
+            if !self.profiles.lock_on_profile_switch {
+                if let Some(parked) = self.background_mocks.remove(id) {
+                    if Self::mock_parked_still_open(&parked) {
+                        self.restore_mock_parked(parked);
+                        self.set_status(format!("Switched to {name}"));
+                        return;
+                    }
+                }
+            }
+            self.screen = Screen::Login;
+            self.login_field = if self.email.is_empty() {
+                LoginField::Email
+            } else {
+                LoginField::Password
+            };
+            self.remember_login = false;
+            self.locked_at = None;
+            self.set_status(format!("Switched to {name}"));
+            return;
+        }
+
+        if let Some(session) = self.background_sessions.remove(id) {
+            let status = session.status();
+            if let Some(email) = session.email() {
+                self.email = email.to_string();
+            }
+            self.server_url = session.server_url().to_string();
+            self.session = Some(session);
+            self.apply_auto_lock_from_profile();
+            match status {
+                SessionStatus::Unlocked => {
+                    self.reload_from_session();
+                    self.screen = Screen::Vault;
+                    self.locked_at = None;
+                    self.remember_login = true;
+                    self.set_status(format!("Switched to {name}"));
+                }
+                SessionStatus::Locked => {
+                    self.screen = Screen::Unlock;
+                    self.locked_at = Some(Instant::now());
+                    self.remember_login = true;
+                    self.set_status(format!("Switched to {name} — enter master password"));
+                }
+                SessionStatus::LoggedOut => {
+                    self.session = None;
+                    self.screen = Screen::Login;
+                    self.locked_at = None;
+                    self.login_field = if self.email.is_empty() {
+                        LoginField::Email
+                    } else {
+                        LoginField::Password
+                    };
+                    self.set_status(format!("Switched to {name}"));
+                }
+            }
+            return;
+        }
+
+        let has_auth = profile_has_auth(&self.data_root, id);
+        self.remember_login = has_auth
+            || self
+                .profiles
+                .get(id)
+                .map(|p| !p.server_url.trim().is_empty() || !p.email.trim().is_empty())
+                .unwrap_or(false);
+
+        match Session::try_restore_saved(self.profile_data_dir()).await {
+            Ok(Some(session)) => {
+                if let Some(email) = session.email() {
+                    self.email = email.to_string();
+                }
+                self.server_url = session.server_url().to_string();
+                self.session = Some(session);
+                self.apply_auto_lock_from_profile();
+                self.screen = Screen::Unlock;
+                self.locked_at = Some(Instant::now());
+                self.set_status(format!("Switched to {name} — enter master password"));
+            }
+            _ => {
+                self.screen = Screen::Login;
+                self.locked_at = None;
+                self.login_field = if self.email.is_empty() {
+                    LoginField::Email
+                } else {
+                    LoginField::Password
+                };
+                self.set_status(format!("Switched to {name}"));
+            }
+        }
+    }
+
+    /// Sign out of the current profile (clears this profile's auth.json only).
+    pub fn sign_out_current_profile(&mut self) {
+        let id = self.active_profile_id.clone();
+        self.background_sessions.remove(&id);
+        self.background_mocks.remove(&id);
+        if let Some(session) = self.session.as_mut() {
+            session.logout();
+        } else if !self.using_mock {
+            Session::clear_persisted_auth(&self.profile_data_dir());
+        }
+        self.session = None;
+        self.password.zeroize();
+        self.unlock_password.zeroize();
+        self.items.clear();
+        self.folders.clear();
+        self.sidebar.clear();
+        self.visible.clear();
+        self.overlay = Overlay::None;
+        self.screen = Screen::Login;
+        self.locked_at = None;
+        self.remember_login = false;
+        self.login_field = if self.email.is_empty() {
+            LoginField::Email
+        } else {
+            LoginField::Password
+        };
+        self.set_status("Signed out");
+    }
+
+    pub async fn profile_manager_create_save(&mut self) {
+        let name = match &self.overlay {
+            Overlay::ProfileManager {
+                mode: ProfileManagerMode::Create { name, .. },
+                ..
+            } => name.clone(),
+            _ => return,
+        };
+        let inherit_server = self.server_url.trim().to_string();
+        let result = if self.using_mock {
+            let display = name.trim();
+            if display.is_empty() {
+                Err("Name cannot be empty".into())
+            } else {
+                let id = allocate_profile_id(&self.profiles, display);
+                self.profiles.profiles.push(VaultProfile {
+                    id: id.clone(),
+                    name: display.to_string(),
+                    server_url: inherit_server.clone(),
+                    email: String::new(),
+                    auto_lock_minutes: Some(15),
+                });
+                Ok(id)
+            }
+        } else {
+            create_profile(
+                &self.data_root,
+                &mut self.profiles,
+                &name,
+                &inherit_server,
+            )
+        };
+        let id = match result {
+            Ok(id) => id,
+            Err(e) => {
+                if let Overlay::ProfileManager {
+                    mode: ProfileManagerMode::Create { error, .. },
+                    ..
+                } = &mut self.overlay
+                {
+                    *error = Some(e);
+                }
+                return;
+            }
+        };
+        self.switch_to_profile(&id).await;
+    }
+
+    pub fn profile_manager_edit_save(&mut self) {
+        let (id, name, server_url, email, auto_lock_input, selected) = match &self.overlay {
+            Overlay::ProfileManager {
+                mode:
+                    ProfileManagerMode::Edit {
+                        id,
+                        name,
+                        server_url,
+                        email,
+                        auto_lock_input,
+                        ..
+                    },
+                selected,
+            } => (
+                id.clone(),
+                name.clone(),
+                server_url.clone(),
+                email.clone(),
+                auto_lock_input.clone(),
+                *selected,
+            ),
+            _ => return,
+        };
+
+        if name.trim().is_empty() {
+            if let Overlay::ProfileManager {
+                mode: ProfileManagerMode::Edit { error, .. },
+                ..
+            } = &mut self.overlay
+            {
+                *error = Some("Name cannot be empty".into());
+            }
+            return;
+        }
+
+        let minutes = match parse_auto_lock_input(&auto_lock_input) {
+            Ok(m) => m,
+            Err(e) => {
+                if let Overlay::ProfileManager {
+                    mode: ProfileManagerMode::Edit { error, .. },
+                    ..
+                } = &mut self.overlay
+                {
+                    *error = Some(e);
+                }
+                return;
+            }
+        };
+
+        let result = if self.using_mock {
+            match self.profiles.get_mut(&id) {
+                Some(p) => {
+                    p.name = name.trim().to_string();
+                    p.server_url = server_url.trim().to_string();
+                    p.email = email.trim().to_string();
+                    p.auto_lock_minutes = minutes;
+                    Ok(())
+                }
+                None => Err(format!("Unknown profile '{id}'")),
+            }
+        } else {
+            update_profile(
+                &self.data_root,
+                &mut self.profiles,
+                &id,
+                &name,
+                &server_url,
+                &email,
+                minutes,
+            )
+        };
+        if let Err(e) = result {
+            if let Overlay::ProfileManager {
+                mode: ProfileManagerMode::Edit { error, .. },
+                ..
+            } = &mut self.overlay
+            {
+                *error = Some(e);
+            }
+            return;
+        }
+
+        if id == self.active_profile_id {
+            if let Some(p) = self.profiles.get(&id) {
+                if !p.server_url.trim().is_empty() {
+                    self.server_url = p.server_url.clone();
+                }
+                self.email = p.email.clone();
+            }
+            self.apply_auto_lock_from_profile();
+        }
+        if let Some(session) = self.background_sessions.get_mut(&id) {
+            session.set_auto_lock(minutes);
+        }
+        if let Some(parked) = self.background_mocks.get_mut(&id) {
+            parked.auto_lock_minutes = minutes;
+        }
+
+        self.overlay = Overlay::ProfileManager {
+            selected,
+            mode: ProfileManagerMode::List,
+        };
+        self.set_status("Profile updated");
+    }
+
+    pub async fn profile_manager_confirm_delete(&mut self) {
+        let Overlay::ProfileManager {
+            mode: ProfileManagerMode::ConfirmDelete { id, .. },
+            ..
+        } = &self.overlay
+        else {
+            return;
+        };
+        let id = id.clone();
+        self.background_sessions.remove(&id);
+        self.background_mocks.remove(&id);
+        let was_active = id == self.active_profile_id;
+        let new_active = if self.using_mock {
+            self.profiles.profiles.retain(|p| p.id != id);
+            if self.profiles.profiles.is_empty() {
+                self.profiles = ProfilesFile::empty_default();
+            }
+            if was_active {
+                self.profiles.active = self.profiles.profiles[0].id.clone();
+            }
+            self.profiles.active.clone()
+        } else {
+            match delete_profile(&self.data_root, &mut self.profiles, &id) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.set_status(e);
+                    return;
+                }
+            }
+        };
+        if was_active {
+            // Drop foreground session for the deleted profile; clear active id so
+            // switch still runs when the replacement reuses the same slug (e.g. default).
+            if let Some(mut session) = self.session.take() {
+                session.lock();
+            }
+            self.items.clear();
+            self.folders.clear();
+            self.sidebar.clear();
+            self.visible.clear();
+            self.active_profile_id.clear();
+            self.switch_to_profile(&new_active).await;
+        } else {
+            let selected = self
+                .profiles
+                .profiles
+                .iter()
+                .position(|p| p.id == self.active_profile_id)
+                .unwrap_or(0);
+            self.overlay = Overlay::ProfileManager {
+                selected,
+                mode: ProfileManagerMode::List,
+            };
+            self.set_status("Profile deleted");
         }
     }
 
@@ -414,6 +1117,7 @@ impl App {
                 self.password.zeroize();
                 self.totp_code.clear();
                 self.persist_login_prefs(&server, &email);
+                self.apply_auto_lock_from_profile();
                 self.reload_from_session();
                 self.screen = Screen::Vault;
                 self.locked_at = None;
@@ -440,6 +1144,7 @@ impl App {
             if self.items.is_empty() {
                 self.load_mock_vault();
             }
+            self.apply_auto_lock_from_profile();
             self.screen = Screen::Vault;
             self.locked_at = None;
             self.last_activity = Instant::now();
@@ -460,6 +1165,7 @@ impl App {
         match result {
             Ok(()) => {
                 self.unlock_password.zeroize();
+                self.apply_auto_lock_from_profile();
                 self.reload_from_session();
                 self.screen = Screen::Vault;
                 self.locked_at = None;
@@ -1291,6 +1997,13 @@ impl App {
             }
         }
 
+        for session in self.background_sessions.values_mut() {
+            session.tick();
+        }
+
+        self.background_mocks
+            .retain(|_, parked| Self::mock_parked_still_open(parked));
+
         if let Some(exp) = self.status_expires {
             if now >= exp && !self.status.starts_with("Locked") && !self.busy {
                 self.status = match self.screen {
@@ -1320,15 +2033,14 @@ impl App {
             }
         }
 
-        if self.using_mock
-            && self.screen == Screen::Vault
-            && now.duration_since(self.last_activity) >= MOCK_LOCK_TIMEOUT
-        {
-            self.lock();
-            self.set_status(format!(
-                "Auto-locked after {}m idle",
-                MOCK_LOCK_TIMEOUT.as_secs() / 60
-            ));
+        if self.using_mock && self.screen == Screen::Vault {
+            if let Some(mins) = self.auto_lock_minutes {
+                let timeout = Duration::from_secs(mins.saturating_mul(60));
+                if now.duration_since(self.last_activity) >= timeout {
+                    self.lock();
+                    self.set_status(format!("Auto-locked after {mins}m idle"));
+                }
+            }
         }
     }
 
@@ -1340,7 +2052,9 @@ impl App {
             return session.lock_remaining();
         }
         if self.using_mock {
-            return MOCK_LOCK_TIMEOUT.checked_sub(self.last_activity.elapsed());
+            let mins = self.auto_lock_minutes?;
+            let timeout = Duration::from_secs(mins.saturating_mul(60));
+            return timeout.checked_sub(self.last_activity.elapsed());
         }
         None
     }
@@ -1379,5 +2093,10 @@ impl Drop for App {
         if let Some(mut s) = self.clipboard_demo.take() {
             s.zeroize();
         }
+        self.clear_background_sessions();
+        if let Some(session) = self.session.as_mut() {
+            session.lock();
+        }
+        self.session = None;
     }
 }
