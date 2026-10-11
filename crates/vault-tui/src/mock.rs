@@ -1,0 +1,240 @@
+//! Sample decrypted vault data for the TUI `--mock` demo.
+
+use crate::models::{DecryptedItem, FolderView, ItemType};
+
+/// Deterministic sample folders.
+pub fn sample_folders() -> Vec<FolderView> {
+    vec![
+        FolderView {
+            id: Some("11111111-1111-1111-1111-111111111111".into()),
+            name: "Personal".into(),
+            count: 0,
+        },
+        FolderView {
+            id: Some("22222222-2222-2222-2222-222222222222".into()),
+            name: "Work".into(),
+            count: 0,
+        },
+        FolderView {
+            id: Some("33333333-3333-3333-3333-333333333333".into()),
+            name: "Finance".into(),
+            count: 0,
+        },
+    ]
+}
+
+/// Deterministic sample decrypted items.
+pub fn sample_items() -> Vec<DecryptedItem> {
+    let personal = "11111111-1111-1111-1111-111111111111".to_string();
+    let work = "22222222-2222-2222-2222-222222222222".to_string();
+    let finance = "33333333-3333-3333-3333-333333333333".to_string();
+
+    vec![
+        DecryptedItem {
+            id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+            name: "GitHub".into(),
+            item_type: ItemType::Login,
+            folder_id: Some(work.clone()),
+            favorite: true,
+            deleted: false,
+            username: Some("octocat".into()),
+            password: Some("gh-demo-password-9x!".into()),
+            totp: Some("JBSWY3DPEHPK3PXP".into()),
+            uris: vec!["https://github.com/login".into()],
+            notes: Some("Work GitHub account".into()),
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
+            name: "Gmail".into(),
+            item_type: ItemType::Login,
+            folder_id: Some(personal.clone()),
+            favorite: true,
+            deleted: false,
+            username: Some("demo@example.com".into()),
+            password: Some("mail-s3cret!".into()),
+            totp: None,
+            uris: vec!["https://mail.google.com".into()],
+            notes: None,
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "cccccccc-cccc-cccc-cccc-cccccccccccc".into(),
+            name: "Vaultwarden Admin".into(),
+            item_type: ItemType::Login,
+            folder_id: Some(work.clone()),
+            favorite: false,
+            deleted: false,
+            username: Some("admin".into()),
+            password: Some("vw-admin-local".into()),
+            totp: Some("HXDMVJECJJWSRB3HWIZR4IFUGFTMXBOZ".into()),
+            uris: vec!["https://vault.example.com".into()],
+            notes: Some("Self-hosted instance".into()),
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "dddddddd-dddd-dddd-dddd-dddddddddddd".into(),
+            name: "Wi-Fi Home".into(),
+            item_type: ItemType::Login,
+            folder_id: Some(personal.clone()),
+            favorite: false,
+            deleted: false,
+            username: Some("HomeNet".into()),
+            password: Some("router-passphrase".into()),
+            totp: None,
+            uris: vec![],
+            notes: Some("Living room AP".into()),
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee".into(),
+            name: "AWS Root".into(),
+            item_type: ItemType::Login,
+            folder_id: Some(work.clone()),
+            favorite: false,
+            deleted: false,
+            username: Some("root@aws.example".into()),
+            password: Some("aws-root-never-use".into()),
+            totp: Some("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into()),
+            uris: vec!["https://console.aws.amazon.com".into()],
+            notes: Some("Break-glass only".into()),
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "ffffffff-ffff-ffff-ffff-ffffffffffff".into(),
+            name: "Bank Login".into(),
+            item_type: ItemType::Login,
+            folder_id: Some(finance.clone()),
+            favorite: true,
+            deleted: false,
+            username: Some("cust-10042".into()),
+            password: Some("bank-demo-pw".into()),
+            totp: None,
+            uris: vec!["https://online.bank.example".into()],
+            notes: None,
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1".into(),
+            name: "Visa ••4242".into(),
+            item_type: ItemType::Card,
+            folder_id: Some(finance),
+            favorite: false,
+            deleted: false,
+            username: None,
+            password: None,
+            totp: None,
+            uris: vec![],
+            notes: Some("Personal debit".into()),
+            card_number: Some("4111111111114242".into()),
+            card_brand: Some("Visa".into()),
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2".into(),
+            name: "Passport details".into(),
+            item_type: ItemType::Identity,
+            folder_id: Some(personal.clone()),
+            favorite: false,
+            deleted: false,
+            username: None,
+            password: None,
+            totp: None,
+            uris: vec![],
+            notes: Some("Travel docs".into()),
+            card_number: None,
+            card_brand: None,
+            identity_name: Some("Alex Example".into()),
+        },
+        DecryptedItem {
+            id: "c3c3c3c3-c3c3-c3c3-c3c3-c3c3c3c3c3c3".into(),
+            name: "Server recovery codes".into(),
+            item_type: ItemType::SecureNote,
+            folder_id: Some(work),
+            favorite: false,
+            deleted: false,
+            username: None,
+            password: None,
+            totp: None,
+            uris: vec![],
+            notes: Some(
+                "Recovery codes (demo):\nABCD-1111\nEFGH-2222\nIJKL-3333\nKeep offline."
+                    .into(),
+            ),
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "d4d4d4d4-d4d4-d4d4-d4d4-d4d4d4d4d4d4".into(),
+            name: "Shopify".into(),
+            item_type: ItemType::Login,
+            folder_id: None,
+            favorite: false,
+            deleted: false,
+            username: Some("shop@example.com".into()),
+            password: Some("shopify-demo".into()),
+            totp: None,
+            uris: vec!["https://admin.shopify.com".into()],
+            notes: None,
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "e5e5e5e5-e5e5-e5e5-e5e5-e5e5e5e5e5e5".into(),
+            name: "Netflix".into(),
+            item_type: ItemType::Login,
+            folder_id: Some(personal),
+            favorite: false,
+            deleted: false,
+            username: Some("family@example.com".into()),
+            password: Some("stream-time".into()),
+            totp: None,
+            uris: vec!["https://www.netflix.com".into()],
+            notes: None,
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+        DecryptedItem {
+            id: "f6f6f6f6-f6f6-f6f6-f6f6-f6f6f6f6f6f6".into(),
+            name: "Meeting notes template".into(),
+            item_type: ItemType::SecureNote,
+            folder_id: None,
+            favorite: false,
+            deleted: false,
+            username: None,
+            password: None,
+            totp: None,
+            uris: vec![],
+            notes: Some("Agenda:\n- Wins\n- Blockers\n- Next steps".into()),
+            card_number: None,
+            card_brand: None,
+            identity_name: None,
+        },
+    ]
+}
+
+/// Refresh folder counts from items (non-deleted only).
+pub fn with_folder_counts(mut folders: Vec<FolderView>, items: &[DecryptedItem]) -> Vec<FolderView> {
+    for folder in &mut folders {
+        folder.count = items
+            .iter()
+            .filter(|i| !i.deleted && i.folder_id == folder.id)
+            .count();
+    }
+    folders
+}

@@ -1,0 +1,27 @@
+[package]
+name = "vault-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal UI for Vaultwarden"
+default-run = "bitwarden-tui"
+
+[[bin]]
+name = "bitwarden-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+directories.workspace = true
+fuzzy-matcher.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vault-session.workspace = true
+zeroize.workspace = true
+serde_json.workspace = true

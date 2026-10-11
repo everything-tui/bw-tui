@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vault-crypto",
+    "crates/vault-api",
+    "crates/vault-session",
+    "crates/vault-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["bitwarden-tui contributors"]
+repository = "https://github.com/everything-tui/bw-tui"
+
+# Master-key derivation (600k PBKDF2 / Argon2) is ~25x slower unoptimized.
+# Generic KDF code is monomorphized inside vault-crypto, so it needs opt-level too.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.vault-crypto]
+opt-level = 3
+
+[workspace.dependencies]
+vault-crypto = { path = "crates/vault-crypto" }
+vault-api = { path = "crates/vault-api" }
+vault-session = { path = "crates/vault-session" }
+
+aes = "0.8"
+anyhow = "1"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+argon2 = "0.5"
+base64 = "0.22"
+block-padding = "0.3"
+cbc = { version = "0.1", features = ["alloc"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+directories = "6"
+fuzzy-matcher = "0.3"
+hkdf = "0.12"
+hmac = "0.12"
+pbkdf2 = "0.12"
+rand = "0.8"
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+rsa = { version = "0.9", features = ["sha2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_repr = "0.1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+totp-rs = { version = "5", features = ["otpauth"] }
+url = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+sha1 = "0.10"
+percent-encoding = "2"
+bytes = "1"

@@ -1,0 +1,26 @@
+[package]
+name = "vault-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bitwarden/Vaultwarden client-side cryptography"
+
+[dependencies]
+aes.workspace = true
+argon2.workspace = true
+base64.workspace = true
+block-padding.workspace = true
+cbc.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+rand.workspace = true
+rsa.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

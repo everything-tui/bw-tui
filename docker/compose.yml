@@ -1,0 +1,23 @@
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: bitwarden-tui-vaultwarden
+    ports:
+      - "8080:80"
+    environment:
+      SIGNUPS_ALLOWED: "true"
+      DOMAIN: "http://127.0.0.1:8080"
+      ADMIN_TOKEN: "dev-only-admin-token"
+    volumes:
+      - vw-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:80/alive"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  vw-data:
+    name: bitwarden-tui-vw-data
