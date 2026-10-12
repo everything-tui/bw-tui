@@ -22,10 +22,13 @@ async fn e2e_register_login_crud() {
         return;
     }
 
-    let email = format!("test{}@example.com", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis());
+    let email = format!(
+        "test{}@example.com",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
 
     let mut session = Session::new(SERVER).expect("session");
 
@@ -111,6 +114,12 @@ async fn e2e_register_login_crud() {
 
     // Cleanup
     session.hard_delete(&item_id).await.expect("hard delete");
-    session.hard_delete(&note_id).await.expect("hard delete note");
-    session.delete_folder(&folder_id).await.expect("delete folder");
+    session
+        .hard_delete(&note_id)
+        .await
+        .expect("hard delete note");
+    session
+        .delete_folder(&folder_id)
+        .await
+        .expect("delete folder");
 }

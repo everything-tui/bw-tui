@@ -1,34 +1,30 @@
-//! Help overlay modal.
+//! Help overlay modal — driven by the canonical keymap table.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::keymap::BINDINGS;
 use crate::ui::layout::center_fixed;
-
-const ACCENT: Color = Color::Rgb(175, 82, 222);
-const MUTED: Color = Color::DarkGray;
-const FG: Color = Color::White;
+use crate::ui::theme;
 
 pub fn draw_help(frame: &mut Frame) {
+    let t = theme();
     let area = frame.area();
-    let popup = center_fixed(64, 27, area);
+    let height = (BINDINGS.len() as u16)
+        .saturating_add(6)
+        .min(area.height.saturating_sub(2));
+    let popup = center_fixed(72, height, area);
 
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Help ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Esc / ? / q to close ",
-            Style::default().fg(MUTED),
-        ));
+        .border_style(t.focused_border())
+        .title(Span::styled(" Help ", t.title()))
+        .title_bottom(Span::styled(" Esc / ? / q to close ", t.muted_style()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -37,52 +33,29 @@ pub fn draw_help(frame: &mut Frame) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    let lines = vec![
-        bind_line("Ctrl+h", "Show/hide password (login · unlock)"),
-        bind_line("Ctrl+r", "Toggle remember this profile's session"),
-        bind_line("Ctrl+p", "Profile manager (create · edit · switch)"),
-        bind_line("e", "Edit profile (name · server · email · auto-lock)"),
-        bind_line("L", "Toggle lock-on-switch (in profile manager)"),
-        bind_line("Ctrl+o", "Sign out current profile (unlock)"),
-        bind_line("Tab / h l", "Focus panes (folders · items · detail)"),
-        bind_line("j / k", "Move selection"),
-        bind_line("Enter / e", "Edit login"),
-        bind_line("/", "Search"),
-        bind_line("n", "New login"),
-        bind_line("Ctrl+n", "New folder"),
-        bind_line("d", "Delete item"),
-        bind_line("f", "Toggle favorite"),
-        bind_line("g", "Password generator"),
-        bind_line("c", "Copy password"),
-        bind_line("y", "Copy username"),
-        bind_line("t", "Copy TOTP code"),
-        bind_line("u", "Copy URI"),
-        bind_line("Ctrl+s", "Sync vault"),
-        bind_line("Ctrl+l", "Lock vault"),
-        bind_line("q", "Quit"),
-        bind_line("?", "Toggle this help"),
-        Line::from(""),
-        Line::from(Span::styled(
+    let lines: Vec<Line> = BINDINGS
+        .iter()
+        .map(|b| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:<14}", b.keys),
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("{} · {}", b.action, b.context), t.normal()),
+            ])
+        })
+        .chain(std::iter::once(Line::from("")))
+        .chain(std::iter::once(Line::from(Span::styled(
             "Panes collapse: detail <80 cols · folders <60 cols",
-            Style::default().fg(MUTED),
-        )),
-    ];
+            t.muted_style(),
+        ))))
+        .collect();
 
     frame.render_widget(Paragraph::new(lines), chunks[0]);
     frame.render_widget(
         Paragraph::new("bitwarden-tui · Vaultwarden client")
-            .style(Style::default().fg(MUTED))
+            .style(t.muted_style())
             .alignment(Alignment::Center),
         chunks[1],
     );
-}
-
-fn bind_line(keys: &str, desc: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("  {keys:<12}"),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(desc.to_string(), Style::default().fg(FG)),
-    ])
 }

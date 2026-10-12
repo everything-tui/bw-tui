@@ -31,12 +31,20 @@ pub struct PreloginResponse {
 }
 
 impl PreloginResponse {
+    /// Convert prelogin KDF fields to crypto params.
+    ///
+    /// Server `kdfMemory` is in **MiB** (Bitwarden API). Defaults match the
+    /// official clients: Argon2id 3 / 64 MiB / 4.
     pub fn to_kdf_params(&self) -> vault_crypto::KdfParams {
         match self.kdf {
             1 => vault_crypto::KdfParams::Argon2id {
                 iterations: self.kdf_iterations,
-                memory_kb: self.kdf_memory.unwrap_or(64 * 1024),
-                parallelism: self.kdf_parallelism.unwrap_or(4),
+                memory_mib: self
+                    .kdf_memory
+                    .unwrap_or(vault_crypto::ARGON2_DEFAULT_MEMORY_MIB),
+                parallelism: self
+                    .kdf_parallelism
+                    .unwrap_or(vault_crypto::ARGON2_DEFAULT_PARALLELISM),
             },
             _ => vault_crypto::KdfParams::Pbkdf2 {
                 iterations: self.kdf_iterations,
@@ -171,7 +179,7 @@ pub struct Cipher {
     #[serde(default)]
     pub fields: Option<Vec<CipherField>>,
     #[serde(default)]
-    pub password_history: Option<Vec<serde_json::Value>>,
+    pub password_history: Option<Vec<PasswordHistoryEntry>>,
     #[serde(default)]
     pub attachments: Option<Vec<serde_json::Value>>,
     #[serde(default)]
@@ -188,6 +196,30 @@ pub struct Cipher {
     pub collection_ids: Option<Vec<String>>,
     #[serde(default)]
     pub object: Option<String>,
+    #[serde(default)]
+    pub ssh_key: Option<CipherSshKey>,
+    /// Preserve unknown server fields across deserialize → re-serialize.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CipherSshKey {
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub key_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordHistoryEntry {
+    pub password: String,
+    #[serde(default)]
+    pub last_used_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -205,6 +237,10 @@ pub struct CipherLogin {
     pub totp: Option<String>,
     #[serde(default)]
     pub autofill_on_page_load: Option<bool>,
+    #[serde(default)]
+    pub fido2_credentials: Option<Vec<serde_json::Value>>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -316,7 +352,7 @@ pub struct CipherRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<CipherField>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub password_history: Option<Vec<serde_json::Value>>,
+    pub password_history: Option<Vec<PasswordHistoryEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -325,10 +361,21 @@ pub struct CipherRequest {
     pub collection_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_key: Option<CipherSshKey>,
     /// Required by Vaultwarden ≥1.34 / Bitwarden web-v2025.6.0
     pub encrypted_for: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_known_revision_date: Option<String>,
+}
+
+/// Minimal body for `PUT /api/ciphers/{id}/partial` (favorite / folder only).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CipherPartialRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+    pub favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

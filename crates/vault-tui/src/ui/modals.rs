@@ -75,7 +75,14 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
         ])
         .split(inner);
 
-    draw_form_field(frame, rows[0], "Name", name, *field == EditField::Name, false);
+    draw_form_field(
+        frame,
+        rows[0],
+        "Name",
+        name,
+        *field == EditField::Name,
+        false,
+    );
     draw_form_field(
         frame,
         rows[1],
@@ -92,9 +99,23 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
         *field == EditField::Password,
         true,
     );
-    draw_form_field(frame, rows[3], "TOTP", totp, *field == EditField::Totp, false);
+    draw_form_field(
+        frame,
+        rows[3],
+        "TOTP",
+        totp,
+        *field == EditField::Totp,
+        true,
+    );
     draw_form_field(frame, rows[4], "URI", uri, *field == EditField::Uri, false);
-    draw_form_field(frame, rows[5], "Notes", notes, *field == EditField::Notes, false);
+    draw_form_field(
+        frame,
+        rows[5],
+        "Notes",
+        notes,
+        *field == EditField::Notes,
+        false,
+    );
 }
 
 fn draw_generator(frame: &mut Frame, app: &App) {
@@ -233,16 +254,19 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App) {
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("y", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "y",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" yes   ", Style::default().fg(MUTED)),
-            Span::styled("n", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "n",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" / Esc cancel", Style::default().fg(MUTED)),
         ]),
     ];
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 fn draw_form_field(

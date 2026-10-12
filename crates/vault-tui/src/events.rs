@@ -6,7 +6,6 @@ use crate::app::{
     App, ClipboardKind, EditField, FocusPane, LoginField, Overlay, PendingAction, ProfileEditField,
     ProfileManagerMode, Screen,
 };
-use crate::debug_log;
 use crate::profiles::format_auto_lock_input;
 
 /// True for printable typing (letters, digits, punctuation), including Shift.
@@ -44,36 +43,12 @@ async fn handle_key(
     detail_visible: bool,
     folders_visible: bool,
 ) -> bool {
-    // #region agent log
-    debug_log::log(
-        "D",
-        "events.rs:handle_key",
-        "handle_key_enter",
-        serde_json::json!({
-            "screen": format!("{:?}", app.screen),
-            "show_help": app.show_help,
-            "overlay_none": matches!(app.overlay, Overlay::None),
-            "is_typing": is_typing(&key),
-            "code": format!("{:?}", key.code),
-            "modifiers": format!("{:?}", key.modifiers),
-        }),
-    );
-    // #endregion
-
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.should_quit = true;
         return true;
     }
 
     if app.show_help {
-        // #region agent log
-        debug_log::log(
-            "D",
-            "events.rs:handle_key",
-            "swallowed_by_help",
-            serde_json::json!({ "code": format!("{:?}", key.code) }),
-        );
-        // #endregion
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
                 app.show_help = false;
@@ -92,14 +67,6 @@ async fn handle_key(
     }
 
     if !matches!(app.overlay, Overlay::None) {
-        // #region agent log
-        debug_log::log(
-            "D",
-            "events.rs:handle_key",
-            "routed_to_overlay",
-            serde_json::json!({ "code": format!("{:?}", key.code) }),
-        );
-        // #endregion
         return handle_overlay(app, key).await;
     }
 
@@ -163,7 +130,8 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Enter if app.login_field == LoginField::Remember => {
-            app.remember_login = !app.remember_login;
+            // Enter on Remember submits (Space still toggles the checkbox).
+            app.queue(PendingAction::Login);
             false
         }
         KeyCode::Enter => {
@@ -203,52 +171,10 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
                 LoginField::Remember => {}
             }
             app.form_error = None;
-            // #region agent log
-            debug_log::log(
-                "B",
-                "events.rs:handle_login",
-                "char_accepted",
-                serde_json::json!({
-                    "field": format!("{:?}", app.login_field),
-                    "char": c.to_string(),
-                    "server_len": app.server_url.len(),
-                    "email_len": app.email.len(),
-                    "password_len": app.password.len(),
-                }),
-            );
-            // #endregion
             false
         }
-        KeyCode::Char(c) => {
-            // #region agent log
-            debug_log::log(
-                "B",
-                "events.rs:handle_login",
-                "char_rejected_by_is_typing",
-                serde_json::json!({
-                    "char": c.to_string(),
-                    "modifiers": format!("{:?}", key.modifiers),
-                    "field": format!("{:?}", app.login_field),
-                }),
-            );
-            // #endregion
-            false
-        }
-        other => {
-            // #region agent log
-            debug_log::log(
-                "E",
-                "events.rs:handle_login",
-                "unhandled_login_key",
-                serde_json::json!({
-                    "code": format!("{other:?}"),
-                    "modifiers": format!("{:?}", key.modifiers),
-                    "field": format!("{:?}", app.login_field),
-                }),
-            );
-            // #endregion
-            false
-        }
+        KeyCode::Char(_) => false,
+        _ => false,
     }
 }
 
@@ -349,6 +275,10 @@ async fn handle_vault(
 
     match key.code {
         KeyCode::Char('q') if is_typing(&key) => {
+            if app.screen == Screen::Vault && !app.using_mock {
+                app.set_status("Press Ctrl+c to quit (vault unlocked)");
+                return false;
+            }
             app.should_quit = true;
             return true;
         }
@@ -388,7 +318,13 @@ async fn handle_vault(
             app.open_edit_login();
         }
         KeyCode::Enter => {
-            app.open_edit_login();
+            if app.in_trash() {
+                if !app.busy {
+                    app.restore_selected().await;
+                }
+            } else {
+                app.open_edit_login();
+            }
         }
         KeyCode::Char('d') if is_typing(&key) => {
             app.open_delete_confirm();
@@ -412,6 +348,15 @@ async fn handle_vault(
         }
         KeyCode::Char('u') if is_typing(&key) => {
             app.copy_field(ClipboardKind::Uri);
+        }
+        KeyCode::Char('r') if is_typing(&key) => {
+            if app.in_trash() {
+                if !app.busy {
+                    app.restore_selected().await;
+                }
+            } else {
+                app.toggle_reveal();
+            }
         }
         KeyCode::Home => {
             match app.focus {
@@ -536,18 +481,20 @@ async fn handle_profile_list(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('k') | KeyCode::Up if is_typing(&key) || key.code == KeyCode::Up => {
             if let Overlay::ProfileManager { selected, .. } = &mut app.overlay {
                 if len > 0 {
-                    *selected = if *selected == 0 { len - 1 } else { *selected - 1 };
+                    *selected = if *selected == 0 {
+                        len - 1
+                    } else {
+                        *selected - 1
+                    };
                 }
             }
             false
         }
         KeyCode::Enter => {
             let id = match &app.overlay {
-                Overlay::ProfileManager { selected, .. } => app
-                    .profiles
-                    .profiles
-                    .get(*selected)
-                    .map(|p| p.id.clone()),
+                Overlay::ProfileManager { selected, .. } => {
+                    app.profiles.profiles.get(*selected).map(|p| p.id.clone())
+                }
                 _ => None,
             };
             if let Some(id) = id {

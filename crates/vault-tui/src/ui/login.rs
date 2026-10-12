@@ -87,7 +87,12 @@ pub fn draw_login(frame: &mut Frame, app: &App) {
         !app.show_password,
     );
 
-    draw_remember(frame, rows[5], app.remember_login, app.login_field == LoginField::Remember);
+    draw_remember(
+        frame,
+        rows[5],
+        app.remember_login,
+        app.login_field == LoginField::Remember,
+    );
 
     if app.pending.is_some() {
         draw_message(frame, rows[7], MessageKind::Busy, "Signing in…");
@@ -168,7 +173,12 @@ pub fn draw_2fa(frame: &mut Frame, app: &App) {
     } else if let Some(err) = &app.form_error {
         draw_message(frame, rows[5], MessageKind::Error, err);
     } else {
-        draw_message(frame, rows[5], MessageKind::Hint, "Enter the code from your authenticator");
+        draw_message(
+            frame,
+            rows[5],
+            MessageKind::Hint,
+            "Enter the code from your authenticator",
+        );
     }
 
     draw_status_bar(frame, status, app, &["Enter verify", "Esc back"]);
@@ -242,7 +252,12 @@ pub fn draw_unlock(frame: &mut Frame, app: &App) {
     } else if let Some(err) = &app.form_error {
         draw_message(frame, rows[5], MessageKind::Error, err);
     } else {
-        draw_message(frame, rows[5], MessageKind::Hint, "Enter your master password");
+        draw_message(
+            frame,
+            rows[5],
+            MessageKind::Hint,
+            "Enter your master password",
+        );
     }
 
     draw_status_bar(
@@ -477,12 +492,13 @@ pub fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App, hints: &[&str])
             format!(" {screen} · {profile} "),
             Style::default().fg(MUTED).bg(STATUS_BG),
         ),
-        Span::styled(
-            format!(" {status}"),
-            Style::default().fg(FG).bg(STATUS_BG),
-        ),
+        Span::styled(format!(" {status}"), Style::default().fg(FG).bg(STATUS_BG)),
     ];
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum::<usize>() + right_w;
+    let used: usize = spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum::<usize>()
+        + right_w;
     spans.push(Span::styled(
         " ".repeat((area.width as usize).saturating_sub(used)),
         Style::default().bg(STATUS_BG),

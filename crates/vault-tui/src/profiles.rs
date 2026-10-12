@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use vault_session::{app_data_dir, profile_dir, profiles_file};
+use vault_session::{app_data_dir, ensure_dir, profile_dir, profiles_file, write_atomic};
 
 /// On-disk profile registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,6 +28,9 @@ pub struct VaultProfile {
     /// Idle auto-lock in minutes. `None` disables auto-lock.
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: Option<u64>,
+    /// Allow storing refresh token in auth.json when OS secure storage fails.
+    #[serde(default)]
+    pub allow_plaintext_token: bool,
 }
 
 const REGISTRY_VERSION: u32 = 1;
@@ -63,6 +66,7 @@ impl ProfilesFile {
                 server_url: String::new(),
                 email: String::new(),
                 auto_lock_minutes: default_auto_lock_minutes(),
+                allow_plaintext_token: false,
             }],
         }
     }
@@ -205,10 +209,10 @@ pub fn load_registry_from(root: &Path) -> ProfilesFile {
 pub fn save_registry_to(root: &Path, file: &ProfilesFile) -> Result<(), String> {
     let path = profiles_file(root);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        ensure_dir(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    write_atomic(&path, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn normalize_registry(file: &mut ProfilesFile, root: &Path) {
@@ -221,7 +225,7 @@ fn normalize_registry(file: &mut ProfilesFile, root: &Path) {
         file.active = file.profiles[0].id.clone();
     }
     for p in &file.profiles {
-        let _ = fs::create_dir_all(profile_dir(root, &p.id));
+        let _ = ensure_dir(&profile_dir(root, &p.id));
     }
 }
 
@@ -255,7 +259,7 @@ fn migrate_legacy(root: &Path) -> Option<ProfilesFile> {
     }
 
     let dest_dir = profile_dir(root, "default");
-    let _ = fs::create_dir_all(&dest_dir);
+    let _ = ensure_dir(&dest_dir);
     if auth_path.exists() {
         let dest = dest_dir.join("auth.json");
         if !dest.exists() {
@@ -279,6 +283,7 @@ fn migrate_legacy(root: &Path) -> Option<ProfilesFile> {
             server_url,
             email,
             auto_lock_minutes: default_auto_lock_minutes(),
+            allow_plaintext_token: false,
         }],
     })
 }
@@ -309,13 +314,14 @@ pub fn create_profile(
         return Err("Name cannot be empty".into());
     }
     let id = allocate_profile_id(file, display);
-    fs::create_dir_all(profile_dir(root, &id)).map_err(|e| e.to_string())?;
+    ensure_dir(&profile_dir(root, &id)).map_err(|e| e.to_string())?;
     file.profiles.push(VaultProfile {
         id: id.clone(),
         name: display.to_string(),
         server_url: server_url.trim().to_string(),
         email: String::new(),
         auto_lock_minutes: default_auto_lock_minutes(),
+        allow_plaintext_token: false,
     });
     save_registry_to(root, file)?;
     Ok(id)
@@ -435,11 +441,7 @@ pub fn set_active(root: &Path, file: &mut ProfilesFile, id: &str) -> Result<(), 
 
 /// Delete a profile directory and registry entry. Recreates `default` if none remain.
 /// Returns the new active profile id.
-pub fn delete_profile(
-    root: &Path,
-    file: &mut ProfilesFile,
-    id: &str,
-) -> Result<String, String> {
+pub fn delete_profile(root: &Path, file: &mut ProfilesFile, id: &str) -> Result<String, String> {
     if file.get(id).is_none() {
         return Err(format!("Unknown profile '{id}'"));
     }
@@ -451,7 +453,7 @@ pub fn delete_profile(
 
     if file.profiles.is_empty() {
         *file = ProfilesFile::empty_default();
-        let _ = fs::create_dir_all(profile_dir(root, "default"));
+        let _ = ensure_dir(&profile_dir(root, "default"));
         save_registry_to(root, file)?;
         return Ok(file.active.clone());
     }
@@ -565,10 +567,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let mut file = load_registry_from(root);
-        assert_eq!(
-            create_profile(root, &mut file, "Work", "").unwrap(),
-            "work"
-        );
+        assert_eq!(create_profile(root, &mut file, "Work", "").unwrap(), "work");
         assert_eq!(
             create_profile(root, &mut file, "Work", "").unwrap(),
             "work-2"

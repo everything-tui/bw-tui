@@ -1,7 +1,9 @@
 //! bitwarden-tui — Vaultwarden password manager terminal UI.
 
-use std::io::{self, stdout, IsTerminal, Write};
+use std::io::{self, stdout, Write};
+use std::panic;
 use std::process::ExitCode;
+use std::sync::{Once, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,10 +18,27 @@ use ratatui::Terminal;
 use tracing_subscriber::EnvFilter;
 use vault_session::app_data_dir;
 use vault_tui::app::{self, App};
-use vault_tui::debug_log;
 use vault_tui::events;
 use vault_tui::profiles::{load_registry_from, profile_has_auth};
 use vault_tui::ui::{self, PaneVisibility};
+
+#[derive(Debug, clap::Subcommand)]
+enum Commands {
+    /// Print session status for a profile
+    Status,
+    /// Unlock and list vault items (id, type, name)
+    List,
+    /// Unlock and print one field from an item (by id or name)
+    Get {
+        /// Item id or exact name
+        query: String,
+        /// Field to print
+        #[arg(long, default_value = "password")]
+        field: String,
+    },
+    /// Unlock and sync the vault
+    Sync,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,7 +48,7 @@ use vault_tui::ui::{self, PaneVisibility};
 )]
 struct Cli {
     /// Named profile (see profiles.json)
-    #[arg(long, env = "BW_PROFILE")]
+    #[arg(long, env = "BW_PROFILE", global = true)]
     profile: Option<String>,
 
     /// List profiles and exit
@@ -47,6 +66,9 @@ struct Cli {
     /// Use in-memory mock vault (no network) for UI testing
     #[arg(long)]
     mock: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
 #[tokio::main]
@@ -71,6 +93,17 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
+    if let Some(cmd) = &cli.command {
+        let ctx = vault_tui::cli::CliCtx::load(app_data_dir(), cli.profile.clone())?;
+        match cmd {
+            Commands::Status => vault_tui::cli::cmd_status(&ctx).await?,
+            Commands::List => vault_tui::cli::cmd_list(&ctx).await?,
+            Commands::Get { query, field } => vault_tui::cli::cmd_get(&ctx, query, field).await?,
+            Commands::Sync => vault_tui::cli::cmd_sync(&ctx).await?,
+        }
+        return Ok(());
+    }
+
     let mut app = match App::new(cli.profile, cli.server, cli.email, cli.mock) {
         Ok(app) => app,
         Err(msg) => {
@@ -80,26 +113,9 @@ async fn run() -> Result<()> {
     };
     app.restore_session_if_saved().await;
 
-    // #region agent log
-    debug_log::log(
-        "C",
-        "main.rs:main",
-        "app_start",
-        serde_json::json!({
-            "mock": cli.mock,
-            "screen": format!("{:?}", app.screen),
-            "login_field": format!("{:?}", app.login_field),
-            "server_len": app.server_url.len(),
-            "email_len": app.email.len(),
-            "profile": app.active_profile_id,
-            "stdin_is_tty": io::stdin().is_terminal(),
-            "stdout_is_tty": io::stdout().is_terminal(),
-        }),
-    );
-    // #endregion
-
     let mut terminal = setup_terminal()?;
     let result = run_loop(&mut terminal, &mut app).await;
+    app.clear_session_clipboard();
     restore_terminal(&mut terminal)?;
     result
 }
@@ -110,8 +126,8 @@ fn list_profiles() {
     let mut out = io::stdout();
     let _ = writeln!(
         out,
-        "{:<2} {:<16} {:<20} {:<32} {}",
-        "", "ID", "NAME", "EMAIL", "SERVER"
+        "{:<2} {:<16} {:<20} {:<32} SERVER",
+        "", "ID", "NAME", "EMAIL"
     );
     for p in &file.profiles {
         let marker = if p.id == file.active { "*" } else { " " };
@@ -135,7 +151,31 @@ fn list_profiles() {
     }
 }
 
+type PanicHookFn = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync>;
+static PANIC_HOOK: OnceLock<PanicHookFn> = OnceLock::new();
+static PANIC_RESTORE: Once = Once::new();
+
+fn install_panic_hook() {
+    let default = panic::take_hook();
+    let _ = PANIC_HOOK.set(default);
+    panic::set_hook(Box::new(|info| {
+        PANIC_RESTORE.call_once(|| {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                crossterm::cursor::Show,
+            );
+        });
+        if let Some(default) = PANIC_HOOK.get() {
+            default(info);
+        }
+    }));
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    install_panic_hook();
     enable_raw_mode().context("enable raw mode")?;
     let mut out = stdout();
     // Do NOT enable mouse capture — it breaks keyboard input in some IDE terminals.
@@ -192,22 +232,6 @@ async fn run_loop(
 
         if let Some(event) = maybe {
             if let Event::Key(key) = &event {
-                // #region agent log
-                debug_log::log(
-                    "A",
-                    "main.rs:run_loop",
-                    "key_event_raw",
-                    serde_json::json!({
-                        "kind": format!("{:?}", key.kind),
-                        "code": format!("{:?}", key.code),
-                        "modifiers": format!("{:?}", key.modifiers),
-                        "screen": format!("{:?}", app.screen),
-                        "login_field": format!("{:?}", app.login_field),
-                        "show_help": app.show_help,
-                        "overlay_none": matches!(app.overlay, app::Overlay::None),
-                    }),
-                );
-                // #endregion
                 // Accept Press + Repeat. Also accept Release for printable chars only
                 // (some IDE terminals emit Release without Press).
                 let accept = match key.kind {
@@ -215,28 +239,8 @@ async fn run_loop(
                     KeyEventKind::Release => matches!(key.code, crossterm::event::KeyCode::Char(_)),
                 };
                 if !accept {
-                    // #region agent log
-                    debug_log::log(
-                        "A",
-                        "main.rs:run_loop",
-                        "key_event_filtered_out",
-                        serde_json::json!({
-                            "kind": format!("{:?}", key.kind),
-                            "code": format!("{:?}", key.code),
-                        }),
-                    );
-                    // #endregion
                     continue;
                 }
-            } else {
-                // #region agent log
-                debug_log::log(
-                    "C",
-                    "main.rs:run_loop",
-                    "non_key_event",
-                    serde_json::json!({ "event": format!("{event:?}") }),
-                );
-                // #endregion
             }
             let quit = events::handle_event(app, event, vis.detail, vis.folders).await;
             if quit || app.should_quit {

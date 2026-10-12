@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, FixedOffset};
 use totp_rs::{Algorithm, Secret, TOTP};
 use vault_api::{
-    CipherLogin, CipherRequest, CipherSecureNote, ClientConfig, LoginUri, RegisterKeys,
-    RegisterRequest, VaultClient,
+    is_insecure_http, CipherLogin, CipherPartialRequest, CipherRequest, CipherSecureNote,
+    ClientConfig, LoginUri, PasswordHistoryEntry, RegisterKeys, RegisterRequest, VaultClient,
 };
 use vault_crypto::{
     auth_hash, derive_master_key, encrypt_bytes, encrypt_with_key, generate_rsa_keypair,
@@ -17,7 +17,7 @@ use crate::clipboard::ClipboardService;
 use crate::decrypt::build_index;
 use crate::error::{Result, SessionError};
 use crate::models::*;
-use crate::paths::app_data_dir;
+use crate::paths::{app_data_dir, ensure_dir, write_atomic};
 use crate::secure_storage::{
     delete_refresh_token_best_effort, get_refresh_token, profile_id_from_data_dir,
     set_refresh_token,
@@ -35,6 +35,20 @@ pub enum SessionStatus {
 pub enum LoginResult {
     Success,
     TwoFactorRequired { providers: Vec<u8> },
+}
+
+/// Profile `allow_plaintext_token` or env `BW_ALLOW_PLAINTEXT_TOKEN` (`1` / `true` / `yes`).
+pub fn plaintext_token_allowed(profile_allow_plaintext: bool) -> bool {
+    if profile_allow_plaintext {
+        return true;
+    }
+    match std::env::var("BW_ALLOW_PLAINTEXT_TOKEN") {
+        Ok(v) => {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
 }
 
 pub struct Session {
@@ -57,6 +71,10 @@ pub struct Session {
     /// True when the in-memory vault came from the encrypted offline cache.
     offline: bool,
     last_synced_at: Option<DateTime<FixedOffset>>,
+    allow_plaintext_token: bool,
+    /// Set when refresh token was written to disk because secure storage failed.
+    pub storage_warning: Option<String>,
+    insecure_http: bool,
 }
 
 impl Session {
@@ -67,8 +85,8 @@ impl Session {
 
     /// Create a session that persists auth under `data_dir` (typically a profile directory).
     pub fn with_data_dir(server_url: &str, data_dir: PathBuf) -> Result<Self> {
-        let client = VaultClient::new(ClientConfig::new(server_url))?;
-        let _ = std::fs::create_dir_all(&data_dir);
+        let client = VaultClient::new(ClientConfig::new(server_url)?)?;
+        let _ = ensure_dir(&data_dir);
         Ok(Self {
             client,
             email: None,
@@ -86,7 +104,22 @@ impl Session {
             last_synced_at: vault_cache::synced_at(&data_dir),
             data_dir,
             offline: false,
+            allow_plaintext_token: false,
+            storage_warning: None,
+            insecure_http: is_insecure_http(server_url),
         })
+    }
+
+    pub fn set_allow_plaintext_token(&mut self, allow: bool) {
+        self.allow_plaintext_token = allow;
+    }
+
+    pub fn server_uses_insecure_http(&self) -> bool {
+        self.insecure_http
+    }
+
+    pub fn clear_clipboard_if_ours(&mut self) {
+        self.clipboard.clear_if_ours();
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -154,7 +187,7 @@ impl Session {
     fn load_from_cache(&mut self) -> Result<()> {
         let (sync, synced_at) = {
             let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
-            vault_cache::load(&self.data_dir, user_key)?
+            vault_cache::load(&self.data_dir, user_key, self.user_id.as_deref())?
         };
         self.apply_sync_profile(&sync);
         {
@@ -171,7 +204,15 @@ impl Session {
         let Some(user_key) = self.user_key.as_ref() else {
             return;
         };
-        match vault_cache::save(&self.data_dir, sync, user_key) {
+        let Some(user_id) = sync
+            .profile
+            .as_ref()
+            .map(|p| p.id.as_str())
+            .or(self.user_id.as_deref())
+        else {
+            return;
+        };
+        match vault_cache::save(&self.data_dir, sync, user_key, user_id) {
             Ok(synced_at) => {
                 self.last_synced_at = Some(synced_at);
             }
@@ -208,6 +249,7 @@ impl Session {
     }
 
     pub fn lock(&mut self) {
+        self.clipboard.clear_if_ours();
         self.user_key = None;
         if let Some(mk) = self.master_key.as_mut() {
             let _ = mk; // ZeroizeOnDrop
@@ -219,7 +261,12 @@ impl Session {
         }
     }
 
-    pub async fn register(&mut self, email: &str, password: &str, name: Option<&str>) -> Result<()> {
+    pub async fn register(
+        &mut self,
+        email: &str,
+        password: &str,
+        name: Option<&str>,
+    ) -> Result<()> {
         let kdf = vault_crypto::KdfParams::Pbkdf2 {
             iterations: 600_000,
         };
@@ -265,11 +312,7 @@ impl Session {
         let master = derive_master_key(password, email, &kdf)?;
         let hash = auth_hash(&master, password)?;
 
-        match self
-            .client
-            .login(email, hash.as_str(), two_factor)
-            .await
-        {
+        match self.client.login(email, hash.as_str(), two_factor).await {
             Ok(token) => {
                 self.email = Some(email.to_string());
                 self.protected_key = token.key.clone().or_else(|| {
@@ -290,9 +333,8 @@ impl Session {
             }
             Err(vault_api::ApiError::TwoFactorRequired { providers, .. }) => {
                 self.email = Some(email.to_string());
-                self.master_key = Some(master);
-                // Keep hash path: caller retries with 2FA
-                // Store password hash context via master key only
+                // Do not retain master_key while still LoggedOut — login_2fa re-derives.
+                drop(master);
                 Ok(LoginResult::TwoFactorRequired { providers })
             }
             Err(e) => Err(e.into()),
@@ -316,10 +358,7 @@ impl Session {
     }
 
     pub async fn unlock(&mut self, password: &str) -> Result<()> {
-        let email = self
-            .email
-            .clone()
-            .ok_or(SessionError::NotLoggedIn)?;
+        let email = self.email.clone().ok_or(SessionError::NotLoggedIn)?;
         // Refresh tokens if needed (ignore transport failures — may unlock offline).
         if self.client.access_token().is_none() && self.client.refresh_token().is_some() {
             let _ = self.client.refresh().await;
@@ -333,26 +372,35 @@ impl Session {
                 kdf
             }
             Err(e) if e.is_transport() || matches!(e, vault_api::ApiError::Http(_)) => {
-                self.kdf
-                    .clone()
-                    .ok_or_else(|| SessionError::Other(
+                self.kdf.clone().ok_or_else(|| {
+                    SessionError::Other(
                         "Cannot unlock offline: missing cached KDF (unlock once online first)"
                             .into(),
-                    ))?
+                    )
+                })?
             }
             Err(e) => return Err(e.into()),
         };
 
         let master = derive_master_key(password, &email, &kdf)?;
+        // Keep master local until unwrap succeeds so a wrong password does not linger.
+        let protected = self
+            .protected_key
+            .as_ref()
+            .ok_or_else(|| SessionError::Other("missing protected key".into()))?;
+        let user_key = unwrap_user_key(protected, &master)?;
         self.master_key = Some(master);
-        self.unlock_with_master()?;
+        self.user_key = Some(user_key);
+        self.status = SessionStatus::Unlocked;
+        self.touch();
 
         match self.sync().await {
             Ok(()) => Ok(()),
             Err(SessionError::Api(ref e))
                 if e.is_transport()
                     || matches!(e, vault_api::ApiError::Http(_))
-                    || matches!(e, vault_api::ApiError::NotAuthenticated) =>
+                    || matches!(e, vault_api::ApiError::NotAuthenticated)
+                    || matches!(e, vault_api::ApiError::Api { status, .. } if *status >= 500) =>
             {
                 self.load_from_cache().map_err(|cache_err| {
                     if matches!(cache_err, SessionError::Other(ref msg) if msg.contains("No offline"))
@@ -386,24 +434,24 @@ impl Session {
         // Sync is allowed while offline — success clears the offline flag.
         let sync = match self.client.sync().await {
             Ok(s) => s,
-            Err(first) => {
-                match self.client.refresh().await {
-                    Ok(_) => self.client.sync().await?,
-                    Err(refresh_err) => {
-                        if self.offline && vault_cache::exists(&self.data_dir) {
-                            return Err(SessionError::Offline);
-                        }
-                        return Err(if matches!(
+            Err(first) => match self.client.refresh().await {
+                Ok(_) => self.client.sync().await?,
+                Err(refresh_err) => {
+                    if self.offline && vault_cache::exists(&self.data_dir) {
+                        return Err(SessionError::Offline);
+                    }
+                    return Err(
+                        if matches!(
                             first,
                             vault_api::ApiError::Http(_) | vault_api::ApiError::NotAuthenticated
                         ) {
                             refresh_err.into()
                         } else {
                             first.into()
-                        });
-                    }
+                        },
+                    );
                 }
-            }
+            },
         };
         self.apply_sync_profile(&sync);
         {
@@ -431,16 +479,20 @@ impl Session {
 
     pub fn verify_reprompt(&self, password: &str) -> Result<bool> {
         let email = self.email.as_ref().ok_or(SessionError::NotLoggedIn)?;
-        let master = self.master_key.as_ref();
-        // Re-derive and compare to stored master key bytes
-        // We may have cleared master on lock — for unlock path use derive
-        let kdf = vault_crypto::KdfParams::default();
+        let master = self.master_key.as_ref().ok_or(SessionError::Locked)?;
+        let kdf = self
+            .kdf
+            .clone()
+            .ok_or_else(|| SessionError::Other("missing KDF parameters".into()))?;
         let derived = derive_master_key(password, email, &kdf)?;
-        if let Some(mk) = master {
-            Ok(mk.as_bytes() == derived.as_bytes())
-        } else {
-            Ok(false)
+        Ok(constant_time_eq(master.as_bytes(), derived.as_bytes()))
+    }
+
+    fn ensure_personal_editable(&self, item: &DecryptedItem) -> Result<()> {
+        if item.organization_id.is_some() || item.has_item_key {
+            return Err(SessionError::OrgEditUnsupported);
         }
+        Ok(())
     }
 
     pub fn copy_password(&mut self, id: &str) -> Result<()> {
@@ -477,7 +529,7 @@ impl Session {
             .totp
             .clone()
             .ok_or_else(|| SessionError::Other("no totp".into()))?;
-        let code = totp_code(&secret)?;
+        let code = totp_from_secret(&secret)?;
         self.clipboard.copy_secret(&code)?;
         self.touch();
         Ok(code)
@@ -486,7 +538,7 @@ impl Session {
     pub fn totp_now(&self, id: &str) -> Option<String> {
         let item = self.get_item(id)?;
         let secret = item.totp.as_ref()?;
-        totp_code(secret).ok()
+        totp_from_secret(secret).ok()
     }
 
     pub async fn create_login(&mut self, draft: &LoginDraft) -> Result<String> {
@@ -502,12 +554,58 @@ impl Session {
 
     pub async fn update_login(&mut self, id: &str, draft: &LoginDraft) -> Result<()> {
         self.ensure_online()?;
+        let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
+        self.ensure_personal_editable(&item)?;
         let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
         let user_id = self.user_id()?;
         let mut req = encrypt_login(draft, user_key, user_id)?;
-        if let Some(item) = self.get_item(id) {
-            req.last_known_revision_date = item.revision_date.clone();
+        req.last_known_revision_date = item.revision_date.clone();
+
+        // Preserve fields the draft does not model (custom fields, attachments, extra URIs, etc.).
+        if let Some(raw) = self.index.raw_ciphers.get(id) {
+            req.fields = raw.fields.clone();
+            req.attachments = raw.attachments.clone();
+            req.organization_id = raw.organization_id.clone();
+            req.collection_ids = raw.collection_ids.clone();
+            req.key = raw.key.clone();
+            if let (Some(login_req), Some(raw_login)) = (req.login.as_mut(), raw.login.as_ref()) {
+                login_req.autofill_on_page_load = raw_login.autofill_on_page_load;
+                login_req.fido2_credentials = raw_login.fido2_credentials.clone();
+                login_req.extra = raw_login.extra.clone();
+                // Keep additional URIs beyond the single primary in the draft.
+                if let Some(raw_uris) = &raw_login.uris {
+                    if raw_uris.len() > 1 {
+                        let mut uris = login_req.uris.take().unwrap_or_default();
+                        uris.extend(raw_uris.iter().skip(1).cloned());
+                        login_req.uris = Some(uris);
+                    }
+                }
+            }
+            // Password history: prepend old password when it changed.
+            let mut history = raw.password_history.clone().unwrap_or_default();
+            let password_changed = draft.password.as_deref() != item.password.as_deref()
+                && draft.password.is_some()
+                && item.password.is_some();
+            if password_changed {
+                if let Some(old_pw) = &item.password {
+                    let enc = encrypt_with_key(old_pw, user_key)?;
+                    history.insert(
+                        0,
+                        PasswordHistoryEntry {
+                            password: enc,
+                            last_used_date: Some(chrono::Utc::now().to_rfc3339()),
+                        },
+                    );
+                    history.truncate(5);
+                }
+            }
+            req.password_history = if history.is_empty() {
+                None
+            } else {
+                Some(history)
+            };
         }
+
         self.client.update_cipher(id, &req).await?;
         self.sync().await?;
         Ok(())
@@ -538,6 +636,7 @@ impl Session {
             organization_id: None,
             collection_ids: None,
             key: None,
+            ssh_key: None,
             encrypted_for: user_id,
             last_known_revision_date: None,
         };
@@ -571,51 +670,13 @@ impl Session {
     pub async fn toggle_favorite(&mut self, id: &str) -> Result<()> {
         self.ensure_online()?;
         let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
-        let user_id = self.user_id()?.to_string();
-        let mut draft = LoginDraft {
-            name: item.name.clone(),
-            username: item.username.clone(),
-            password: item.password.clone(),
-            totp: item.totp.clone(),
-            uri: item.primary_uri().map(str::to_string),
-            notes: item.notes.clone(),
+        // Org items: favoriting via partial is OK (does not re-encrypt). Item-key personal
+        // items are also fine — partial does not touch ciphertext.
+        let partial = CipherPartialRequest {
             folder_id: item.folder_id.clone(),
             favorite: !item.favorite,
-            reprompt: item.reprompt,
         };
-        if item.item_type == ItemType::Login {
-            let mut req = encrypt_login(&draft, user_key, &user_id)?;
-            req.last_known_revision_date = item.revision_date.clone();
-            self.client.update_cipher(id, &req).await?;
-        } else if item.item_type == ItemType::SecureNote {
-            let req = CipherRequest {
-                cipher_type: 2,
-                name: encrypt_with_key(&draft.name, user_key)?,
-                notes: draft
-                    .notes
-                    .as_ref()
-                    .map(|n| encrypt_with_key(n, user_key))
-                    .transpose()?,
-                folder_id: draft.folder_id.clone(),
-                favorite: draft.favorite,
-                reprompt: Some(0),
-                login: None,
-                secure_note: Some(CipherSecureNote { note_type: Some(0) }),
-                card: None,
-                identity: None,
-                fields: None,
-                password_history: None,
-                attachments: None,
-                organization_id: None,
-                collection_ids: None,
-                key: None,
-                encrypted_for: user_id,
-                last_known_revision_date: item.revision_date.clone(),
-            };
-            self.client.update_cipher(id, &req).await?;
-        }
-        draft.zeroize_fields();
+        self.client.update_cipher_partial(id, &partial).await?;
         self.sync().await?;
         Ok(())
     }
@@ -646,7 +707,7 @@ impl Session {
         Ok(())
     }
 
-    fn persist_auth(&self) -> Result<()> {
+    fn persist_auth(&mut self) -> Result<()> {
         let Some(email) = &self.email else {
             return Ok(());
         };
@@ -654,20 +715,40 @@ impl Session {
             return Ok(());
         };
 
+        let allow_plaintext = plaintext_token_allowed(self.allow_plaintext_token);
         let profile_id = profile_id_from_data_dir(&self.data_dir);
+        let mut used_disk_fallback = false;
         let disk_refresh = match profile_id.as_deref() {
             Some(id) => match set_refresh_token(id, refresh) {
-                Ok(()) => None,
+                Ok(()) => {
+                    let _ = scrub_refresh_token_from_auth_file(&self.data_dir);
+                    None
+                }
                 Err(e) => {
+                    if !allow_plaintext {
+                        return Err(SessionError::Other(format!(
+                            "secure storage unavailable and plaintext refresh token storage is disabled ({e})"
+                        )));
+                    }
                     tracing::warn!(
                         profile_id = %id,
                         error = %e,
                         "secure storage unavailable; storing refresh token on disk"
                     );
+                    used_disk_fallback = true;
                     Some(refresh.to_string())
                 }
             },
-            None => Some(refresh.to_string()),
+            None => {
+                if !allow_plaintext {
+                    return Err(SessionError::Other(
+                        "cannot store refresh token: profile id missing and plaintext storage is disabled"
+                            .into(),
+                    ));
+                }
+                used_disk_fallback = true;
+                Some(refresh.to_string())
+            }
         };
 
         let mut auth = PersistedAuth {
@@ -685,11 +766,16 @@ impl Session {
         if let Some(kdf) = &self.kdf {
             auth.set_kdf_from_params(kdf);
         }
-        let _ = std::fs::create_dir_all(&self.data_dir);
+        ensure_dir(&self.data_dir)?;
         let path = self.data_dir.join("auth.json");
-        let json = serde_json::to_string_pretty(&auth)
-            .map_err(|e| SessionError::Other(e.to_string()))?;
-        std::fs::write(path, json)?;
+        let json =
+            serde_json::to_string_pretty(&auth).map_err(|e| SessionError::Other(e.to_string()))?;
+        write_atomic(&path, json.as_bytes())?;
+        if used_disk_fallback {
+            tracing::warn!("refresh token stored in auth.json (secure storage fallback)");
+            self.storage_warning =
+                Some("Refresh token saved to auth.json because OS secure storage failed".into());
+        }
         Ok(())
     }
 
@@ -724,8 +810,14 @@ impl Session {
     }
 
     /// Restore a locked session from `auth.json` in `data_dir` if the server URL matches.
-    pub async fn try_restore(server_url: &str, data_dir: PathBuf) -> Result<Option<Self>> {
-        let Some((session, stored_server)) = Self::try_restore_inner(data_dir).await? else {
+    pub async fn try_restore(
+        server_url: &str,
+        data_dir: PathBuf,
+        allow_plaintext_token: bool,
+    ) -> Result<Option<Self>> {
+        let Some((session, stored_server)) =
+            Self::try_restore_inner(data_dir, allow_plaintext_token).await?
+        else {
             return Ok(None);
         };
         if stored_server.trim_end_matches('/') != server_url.trim_end_matches('/') {
@@ -735,11 +827,19 @@ impl Session {
     }
 
     /// Restore a locked session from whatever server is stored in `data_dir/auth.json`.
-    pub async fn try_restore_saved(data_dir: PathBuf) -> Result<Option<Self>> {
-        Ok(Self::try_restore_inner(data_dir).await?.map(|(s, _)| s))
+    pub async fn try_restore_saved(
+        data_dir: PathBuf,
+        allow_plaintext_token: bool,
+    ) -> Result<Option<Self>> {
+        Ok(Self::try_restore_inner(data_dir, allow_plaintext_token)
+            .await?
+            .map(|(s, _)| s))
     }
 
-    async fn try_restore_inner(data_dir: PathBuf) -> Result<Option<(Self, String)>> {
+    async fn try_restore_inner(
+        data_dir: PathBuf,
+        allow_plaintext_token: bool,
+    ) -> Result<Option<(Self, String)>> {
         let path = data_dir.join("auth.json");
         if !path.exists() {
             return Ok(None);
@@ -747,13 +847,18 @@ impl Session {
         let json = std::fs::read_to_string(&path)?;
         let auth: PersistedAuth =
             serde_json::from_str(&json).map_err(|e| SessionError::Other(e.to_string()))?;
+        if let Some(id) = profile_id_from_data_dir(&data_dir) {
+            if matches!(get_refresh_token(&id), Ok(Some(t)) if !t.is_empty()) {
+                let _ = scrub_refresh_token_from_auth_file(&data_dir);
+            }
+        }
         let Some(refresh) = Self::resolve_refresh_token(&data_dir, &auth) else {
             // Metadata without a usable refresh token — treat as logged out.
             Self::clear_persisted_auth(&data_dir);
             return Ok(None);
         };
         let server_url = auth.server_url.clone();
-        let mut config = ClientConfig::new(&server_url);
+        let mut config = ClientConfig::new(&server_url)?;
         config.device_id = auth.device_id.clone();
         let mut client = VaultClient::new(config)?;
         client.set_tokens(String::new(), Some(refresh));
@@ -778,7 +883,7 @@ impl Session {
 
         let kdf = auth.to_kdf_params();
         let last_synced_at = vault_cache::synced_at(&data_dir);
-        let session = Self {
+        let mut session = Self {
             client,
             email: Some(auth.email),
             user_id: None,
@@ -795,6 +900,9 @@ impl Session {
             last_synced_at,
             data_dir,
             offline: false,
+            allow_plaintext_token,
+            storage_warning: None,
+            insecure_http: is_insecure_http(&server_url),
         };
         if refresh_ok {
             // Re-persist in case the server rotated the refresh token (and upgrade disk → keyring).
@@ -804,6 +912,7 @@ impl Session {
     }
 
     pub fn logout(&mut self) {
+        self.clipboard.clear_if_ours();
         self.lock();
         self.client.clear_tokens();
         self.email = None;
@@ -818,9 +927,12 @@ impl Session {
 }
 
 impl LoginDraft {
-    fn zeroize_fields(&mut self) {
+    pub fn zeroize_fields(&mut self) {
         if let Some(p) = &mut self.password {
             p.zeroize();
+        }
+        if let Some(t) = &mut self.totp {
+            t.zeroize();
         }
     }
 }
@@ -862,6 +974,8 @@ fn encrypt_login(draft: &LoginDraft, key: &UserKey, user_id: &str) -> Result<Cip
                 .map(|t| encrypt_with_key(t, key))
                 .transpose()?,
             autofill_on_page_load: None,
+            fido2_credentials: None,
+            extra: Default::default(),
         }),
         secure_note: None,
         card: None,
@@ -872,20 +986,59 @@ fn encrypt_login(draft: &LoginDraft, key: &UserKey, user_id: &str) -> Result<Cip
         organization_id: None,
         collection_ids: None,
         key: None,
+        ssh_key: None,
         encrypted_for: user_id.to_string(),
         last_known_revision_date: None,
     })
 }
 
-fn totp_code(secret_or_uri: &str) -> Result<String> {
+/// Remove a legacy plaintext refresh token from `auth.json` when the keyring holds the secret.
+fn scrub_refresh_token_from_auth_file(data_dir: &Path) -> Result<()> {
+    let path = data_dir.join("auth.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let json = std::fs::read_to_string(&path)?;
+    let mut auth: PersistedAuth =
+        serde_json::from_str(&json).map_err(|e| SessionError::Other(e.to_string()))?;
+    if auth.refresh_token.is_none() {
+        return Ok(());
+    }
+    auth.refresh_token = None;
+    let out =
+        serde_json::to_string_pretty(&auth).map_err(|e| SessionError::Other(e.to_string()))?;
+    write_atomic(&path, out.as_bytes())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Compute the current TOTP code from a Bitwarden secret or `otpauth://` URI.
+pub fn totp_from_secret(secret_or_uri: &str) -> Result<String> {
     let totp = if secret_or_uri.starts_with("otpauth://") {
         TOTP::from_url(secret_or_uri).map_err(|e| SessionError::Other(e.to_string()))?
     } else {
         let secret = Secret::Encoded(secret_or_uri.to_string())
             .to_bytes()
             .map_err(|e| SessionError::Other(format!("{e:?}")))?;
-        TOTP::new(Algorithm::SHA1, 6, 1, 30, secret, None, "bitwarden-tui".to_string())
-            .map_err(|e| SessionError::Other(e.to_string()))?
+        TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret,
+            None,
+            "bitwarden-tui".to_string(),
+        )
+        .map_err(|e| SessionError::Other(e.to_string()))?
     };
     totp.generate_current()
         .map_err(|e| SessionError::Other(e.to_string()))
@@ -980,7 +1133,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("empty");
         std::fs::create_dir_all(&dir).unwrap();
-        let restored = Session::try_restore_saved(dir).await.unwrap();
+        let restored = Session::try_restore_saved(dir, false).await.unwrap();
         assert!(restored.is_none());
     }
 
@@ -999,10 +1152,7 @@ mod tests {
 
             let auth = read_auth(&dir);
             assert!(auth.refresh_token.is_none());
-            assert_eq!(
-                mem.get("work").unwrap().as_deref(),
-                Some("refresh-secret")
-            );
+            assert_eq!(mem.get("work").unwrap().as_deref(), Some("refresh-secret"));
         });
     }
 
@@ -1012,6 +1162,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let dir = tmp.path().join("profiles/home");
             let mut session = Session::with_data_dir("http://127.0.0.1:8080", dir.clone()).unwrap();
+            session.set_allow_plaintext_token(true);
             session.email = Some("u@ex.com".into());
             session
                 .client
@@ -1020,6 +1171,41 @@ mod tests {
 
             let auth = read_auth(&dir);
             assert_eq!(auth.refresh_token.as_deref(), Some("disk-tok"));
+            assert!(session.storage_warning.is_some());
+        });
+    }
+
+    #[test]
+    fn persist_auth_scrubs_legacy_disk_token_when_keyring_works() {
+        let mem = Arc::new(MemoryRefreshTokenStore::new());
+        with_refresh_token_store_for_tests(mem.clone(), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("profiles/work");
+            write_dummy_auth(&dir, Some("legacy-disk"));
+            let mut session = Session::with_data_dir("http://127.0.0.1:8080", dir.clone()).unwrap();
+            session.email = Some("u@ex.com".into());
+            session
+                .client
+                .set_tokens("access".into(), Some("refresh-new".into()));
+            session.persist_auth().unwrap();
+            let auth = read_auth(&dir);
+            assert!(auth.refresh_token.is_none());
+            assert_eq!(mem.get("work").unwrap().as_deref(), Some("refresh-new"));
+        });
+    }
+
+    #[test]
+    fn persist_auth_errors_when_secure_storage_fails_without_plaintext() {
+        with_refresh_token_store_for_tests(Arc::new(FailingRefreshTokenStore), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("profiles/home");
+            let mut session = Session::with_data_dir("http://127.0.0.1:8080", dir.clone()).unwrap();
+            session.set_allow_plaintext_token(false);
+            session.email = Some("u@ex.com".into());
+            session
+                .client
+                .set_tokens("access".into(), Some("disk-tok".into()));
+            assert!(session.persist_auth().is_err());
         });
     }
 
@@ -1137,6 +1323,8 @@ mod tests {
                     password_revision_date: None,
                     totp: None,
                     autofill_on_page_load: None,
+                    fido2_credentials: None,
+                    extra: Default::default(),
                 }),
                 secure_note: None,
                 card: None,
@@ -1149,12 +1337,14 @@ mod tests {
                 creation_date: None,
                 collection_ids: None,
                 object: None,
+                ssh_key: None,
+                extra: Default::default(),
             }],
             sends: vec![],
             policies: vec![],
             domains: None,
         };
-        vault_cache::save(dir, &sync, &user_key).unwrap();
+        vault_cache::save(dir, &sync, &user_key, "user-offline").unwrap();
         user_key
     }
 
@@ -1168,7 +1358,9 @@ mod tests {
                 assert!(dir.join("auth.json").exists());
                 assert!(vault_cache::exists(&dir));
 
-                let restored = Session::try_restore_saved(dir.clone()).await.unwrap();
+                let restored = Session::try_restore_saved(dir.clone(), false)
+                    .await
+                    .unwrap();
                 assert!(restored.is_some());
                 assert!(dir.join("auth.json").exists());
                 assert!(vault_cache::exists(&dir));
@@ -1187,7 +1379,7 @@ mod tests {
                 let dir = tmp.path().join("profiles/work");
                 let _ = seed_offline_vault(&dir, "a@b.c", "TestPassword123!");
 
-                let mut session = Session::try_restore_saved(dir.clone())
+                let mut session = Session::try_restore_saved(dir.clone(), true)
                     .await
                     .unwrap()
                     .expect("restored");
@@ -1243,7 +1435,9 @@ mod tests {
                 )
                 .unwrap();
 
-                let restored = Session::try_restore_saved(dir.clone()).await.unwrap();
+                let restored = Session::try_restore_saved(dir.clone(), false)
+                    .await
+                    .unwrap();
                 assert!(restored.is_none());
                 assert!(!dir.join("auth.json").exists());
             });

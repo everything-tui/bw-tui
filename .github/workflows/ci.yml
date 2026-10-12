@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  check:
+    name: fmt / clippy / test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+  integration:
+    name: Vaultwarden integration
+    runs-on: ubuntu-latest
+    services:
+      vaultwarden:
+        image: vaultwarden/server:latest
+        ports:
+          - 8080:80
+        env:
+          SIGNUPS_ALLOWED: "true"
+          ADMIN_TOKEN: "dev-only-admin-token"
+          DOMAIN: "http://127.0.0.1:8080"
+        options: >-
+          --health-cmd "curl -f http://localhost/alive || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      VAULTWARDEN_URL: http://127.0.0.1:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: wait for vaultwarden
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf "$VAULTWARDEN_URL/alive" && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: integration tests
+        run: cargo test -p vault-session --test integration -- --nocapture

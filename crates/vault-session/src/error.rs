@@ -20,6 +20,8 @@ pub enum SessionError {
     NotFound,
     #[error("reprompt required")]
     RepromptRequired,
+    #[error("organization / shared items cannot be edited yet")]
+    OrgEditUnsupported,
     #[error("clipboard: {0}")]
     Clipboard(String),
     #[error("IO: {0}")]

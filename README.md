@@ -66,6 +66,7 @@ Older installs with a flat `login.json` / `auth.json` are migrated once into pro
 | `j` / `k` or `↓` / `↑` | Move selection |
 | `Tab` / `h` / `l` | Cycle pane focus |
 | `c` / `y` / `t` / `u` | Copy password / username / TOTP / URI |
+| `r` | Reveal secrets in detail (15s) / restore from trash |
 | `n` / `e` / `d` / `f` | New / edit / delete / favorite |
 | `g` | Password generator |
 | `Ctrl+s` | Sync vault |
@@ -75,10 +76,24 @@ Older installs with a flat `login.json` / `auth.json` are migrated once into pro
 | `L` | Toggle lock-on-switch (in profile manager) |
 | `Ctrl+o` | Sign out current profile (unlock) |
 | `Ctrl+n` | New folder |
+| `Home` / `End` / `PgUp` / `PgDn` | Jump / page selection |
 | `?` | Help |
 | `q` | Quit |
 
 Press `?` in the app for the full map. Use `--mock` for UI-only demos without a server.
+
+### Scripting CLI
+
+After signing in once via the TUI (so a profile session exists):
+
+```bash
+bitwarden-tui --profile work status
+bitwarden-tui list
+bitwarden-tui get "GitHub" --field password
+bitwarden-tui sync
+```
+
+Master password is read from stdin (or `BW_PASSWORD` — discouraged). Set `BW_ALLOW_PLAINTEXT_TOKEN=1` only if OS keychain is unavailable and you accept disk-backed refresh tokens.
 
 ## Security notes
 

@@ -66,7 +66,15 @@ pub struct DecryptedItem {
     pub notes: Option<String>,
     pub card_number: Option<String>,
     pub card_brand: Option<String>,
+    pub card_exp_month: Option<String>,
+    pub card_exp_year: Option<String>,
+    pub card_code: Option<String>,
     pub identity_name: Option<String>,
+    pub ssh_private_key: Option<String>,
+    pub ssh_public_key: Option<String>,
+    pub ssh_fingerprint: Option<String>,
+    pub has_item_key: bool,
+    pub reprompt: bool,
 }
 
 impl DecryptedItem {
@@ -85,7 +93,15 @@ impl DecryptedItem {
             notes: item.notes.clone(),
             card_number: item.card_number.clone(),
             card_brand: item.card_brand.clone(),
+            card_exp_month: item.card_exp_month.clone(),
+            card_exp_year: item.card_exp_year.clone(),
+            card_code: item.card_code.clone(),
             identity_name: item.identity_name(),
+            ssh_private_key: item.ssh_private_key.clone(),
+            ssh_public_key: item.ssh_public_key.clone(),
+            ssh_fingerprint: item.ssh_fingerprint.clone(),
+            has_item_key: item.has_item_key,
+            reprompt: item.reprompt,
         }
     }
 
@@ -103,23 +119,52 @@ impl DecryptedItem {
             ItemType::SecureNote => self
                 .notes
                 .as_deref()
-                .map(|n| {
-                    let line = n.lines().next().unwrap_or("");
-                    if line.len() > 48 {
-                        format!("{}…", &line[..45])
-                    } else {
-                        line.to_string()
-                    }
+                .map(truncate_note_preview)
+                .unwrap_or_default(),
+            ItemType::Card => {
+                card_list_subtitle(self.card_brand.as_deref(), self.card_number.as_deref())
+            }
+            ItemType::Identity => self.identity_name.clone().unwrap_or_default(),
+            ItemType::SshKey => self
+                .ssh_fingerprint
+                .clone()
+                .or_else(|| {
+                    self.ssh_public_key
+                        .as_ref()
+                        .map(|k| truncate_note_preview(k))
                 })
                 .unwrap_or_default(),
-            ItemType::Card => self
-                .card_brand
-                .clone()
-                .or_else(|| self.card_number.clone())
-                .unwrap_or_default(),
-            ItemType::Identity => self.identity_name.clone().unwrap_or_default(),
-            ItemType::SshKey | ItemType::Unknown => String::new(),
+            ItemType::Unknown => String::new(),
         }
+    }
+}
+
+fn truncate_note_preview(line: &str) -> String {
+    let line = line.lines().next().unwrap_or("");
+    let truncated: String = line.chars().take(45).collect();
+    if line.chars().count() > 48 {
+        format!("{truncated}…")
+    } else {
+        line.to_string()
+    }
+}
+
+fn card_list_subtitle(brand: Option<&str>, number: Option<&str>) -> String {
+    let last4 = number.and_then(card_last4);
+    match (brand.filter(|b| !b.is_empty()), last4) {
+        (Some(b), Some(l4)) => format!("{b} •••• {l4}"),
+        (Some(b), None) => b.to_string(),
+        (None, Some(l4)) => format!("•••• {l4}"),
+        (None, None) => String::new(),
+    }
+}
+
+fn card_last4(number: &str) -> Option<String> {
+    let digits: String = number.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() >= 4 {
+        Some(digits[digits.len() - 4..].to_string())
+    } else {
+        None
     }
 }
 
@@ -150,6 +195,7 @@ pub enum FilterKind {
     SecureNote,
     Card,
     Identity,
+    SshKey,
     Trash,
     Folder(String),
     NoFolder,
@@ -164,6 +210,7 @@ impl FilterKind {
             Self::SecureNote => item.item_type == ItemType::SecureNote && !item.deleted,
             Self::Card => item.item_type == ItemType::Card && !item.deleted,
             Self::Identity => item.item_type == ItemType::Identity && !item.deleted,
+            Self::SshKey => item.item_type == ItemType::SshKey && !item.deleted,
             Self::Trash => item.deleted,
             Self::Folder(id) => !item.deleted && item.folder_id.as_ref() == Some(id),
             Self::NoFolder => !item.deleted && item.folder_id.is_none(),
@@ -177,4 +224,70 @@ pub struct SidebarEntry {
     pub label: String,
     pub kind: FilterKind,
     pub count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_subtitle_truncates_by_char_not_byte() {
+        let item = DecryptedItem {
+            id: "x".into(),
+            name: "n".into(),
+            item_type: ItemType::SecureNote,
+            folder_id: None,
+            favorite: false,
+            deleted: false,
+            username: None,
+            password: None,
+            totp: None,
+            uris: vec![],
+            notes: Some("😀".repeat(50)),
+            card_number: None,
+            card_brand: None,
+            card_exp_month: None,
+            card_exp_year: None,
+            card_code: None,
+            identity_name: None,
+            ssh_private_key: None,
+            ssh_public_key: None,
+            ssh_fingerprint: None,
+            has_item_key: false,
+            reprompt: false,
+        };
+        let sub = item.subtitle();
+        assert!(sub.ends_with('…'));
+        assert!(sub.chars().count() <= 48);
+    }
+
+    #[test]
+    fn card_subtitle_masks_pan() {
+        let item = DecryptedItem {
+            id: "c".into(),
+            name: "card".into(),
+            item_type: ItemType::Card,
+            folder_id: None,
+            favorite: false,
+            deleted: false,
+            username: None,
+            password: None,
+            totp: None,
+            uris: vec![],
+            notes: None,
+            card_number: Some("4111 1111 1111 1234".into()),
+            card_brand: Some("Visa".into()),
+            card_exp_month: None,
+            card_exp_year: None,
+            card_code: None,
+            identity_name: None,
+            ssh_private_key: None,
+            ssh_public_key: None,
+            ssh_fingerprint: None,
+            has_item_key: false,
+            reprompt: false,
+        };
+        assert_eq!(item.subtitle(), "Visa •••• 1234");
+        assert!(!item.subtitle().contains("4111"));
+    }
 }

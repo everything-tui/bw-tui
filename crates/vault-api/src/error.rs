@@ -21,6 +21,8 @@ pub enum ApiError {
     Url(String),
     #[error("not authenticated")]
     NotAuthenticated,
+    #[error("user already exists")]
+    UserExists,
     #[error("{0}")]
     Other(String),
 }
@@ -42,7 +44,7 @@ impl ApiError {
 
     /// True when the server rejected credentials / tokens.
     pub fn is_auth_rejection(&self) -> bool {
-        matches!(self, Self::Api { status, .. } if matches!(*status, 400 | 401 | 403))
+        matches!(self, Self::Api { status, .. } if matches!(*status, 401 | 403))
     }
 }
 

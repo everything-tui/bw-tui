@@ -8,8 +8,8 @@ use chrono::{DateTime, Local};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use vault_session::{
-    app_data_dir, generate_password, normalize_server_url, profile_dir, LoginDraft, LoginResult,
-    Session, SessionStatus,
+    app_data_dir, generate_password, normalize_server_url, plaintext_token_allowed, profile_dir,
+    LoginDraft, LoginResult, Session, SessionStatus,
 };
 use zeroize::Zeroize;
 
@@ -247,6 +247,8 @@ pub struct App {
     // --- Status / timers ---
     pub status: String,
     pub status_expires: Option<Instant>,
+    /// When true, idle status expiry must not replace the message (lock / sync idle).
+    pub status_sticky: bool,
     /// Local time of the most recent successful vault sync.
     pub last_synced_at: Option<DateTime<Local>>,
     pub last_activity: Instant,
@@ -254,6 +256,9 @@ pub struct App {
     pub clipboard_clear_at: Option<Instant>,
     pub clipboard_kind: Option<ClipboardKind>,
     pub clipboard_demo: Option<String>,
+    /// Temporarily show password / TOTP / card code in the detail pane.
+    pub reveal_secrets: bool,
+    pub reveal_until: Option<Instant>,
 
     /// When true, use mock vault (no network). Set by `--mock`.
     pub using_mock: bool,
@@ -309,6 +314,7 @@ impl App {
                 server_url: String::new(),
                 email: String::new(),
                 auto_lock_minutes: Some(15),
+                allow_plaintext_token: false,
             });
 
         let cli_server = server.filter(|s| !s.is_empty());
@@ -378,12 +384,15 @@ impl App {
                 "Ready — press ? for help".into()
             },
             status_expires: None,
+            status_sticky: true,
             last_synced_at: None,
             last_activity: Instant::now(),
             locked_at: None,
             clipboard_clear_at: None,
             clipboard_kind: None,
             clipboard_demo: None,
+            reveal_secrets: false,
+            reveal_until: None,
             using_mock: mock,
             session: None,
             background_sessions: HashMap::new(),
@@ -400,6 +409,25 @@ impl App {
 
     pub fn profile_data_dir(&self) -> PathBuf {
         profile_dir(&self.data_root, &self.active_profile_id)
+    }
+
+    fn profile_plaintext_token_allowed(&self) -> bool {
+        plaintext_token_allowed(
+            self.profiles
+                .get(&self.active_profile_id)
+                .map(|p| p.allow_plaintext_token)
+                .unwrap_or(false),
+        )
+    }
+
+    fn configure_session_persist(&self, session: &mut Session) {
+        session.set_allow_plaintext_token(self.profile_plaintext_token_allowed());
+    }
+
+    pub fn clear_session_clipboard(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            session.clear_clipboard_if_ours();
+        }
     }
 
     pub fn active_profile_name(&self) -> &str {
@@ -607,6 +635,7 @@ impl App {
                 return;
             }
         };
+        self.configure_session_persist(&mut session);
 
         match session.login(&email, &password, None).await {
             Ok(LoginResult::Success) => {
@@ -669,7 +698,12 @@ impl App {
             return;
         }
         self.set_status("Restoring session…");
-        match Session::try_restore_saved(self.profile_data_dir()).await {
+        match Session::try_restore_saved(
+            self.profile_data_dir(),
+            self.profile_plaintext_token_allowed(),
+        )
+        .await
+        {
             Ok(Some(session)) => {
                 if let Some(email) = session.email() {
                     self.email = email.to_string();
@@ -818,7 +852,12 @@ impl App {
                 .map(|p| !p.server_url.trim().is_empty() || !p.email.trim().is_empty())
                 .unwrap_or(false);
 
-        match Session::try_restore_saved(self.profile_data_dir()).await {
+        match Session::try_restore_saved(
+            self.profile_data_dir(),
+            self.profile_plaintext_token_allowed(),
+        )
+        .await
+        {
             Ok(Some(session)) => {
                 if let Some(email) = session.email() {
                     self.email = email.to_string();
@@ -894,16 +933,12 @@ impl App {
                     server_url: inherit_server.clone(),
                     email: String::new(),
                     auto_lock_minutes: Some(15),
+                    allow_plaintext_token: false,
                 });
                 Ok(id)
             }
         } else {
-            create_profile(
-                &self.data_root,
-                &mut self.profiles,
-                &name,
-                &inherit_server,
-            )
+            create_profile(&self.data_root, &mut self.profiles, &name, &inherit_server)
         };
         let id = match result {
             Ok(id) => id,
@@ -1196,6 +1231,8 @@ impl App {
         self.search_query.clear();
         self.show_help = false;
         self.overlay = Overlay::None;
+        self.reveal_secrets = false;
+        self.reveal_until = None;
         if let Some(mut s) = self.clipboard_demo.take() {
             s.zeroize();
         }
@@ -1215,7 +1252,7 @@ impl App {
 
         self.screen = Screen::Unlock;
         self.locked_at = Some(Instant::now());
-        self.set_status("Vault locked");
+        self.set_sticky_status("Vault locked");
     }
 
     fn load_mock_vault(&mut self) {
@@ -1238,7 +1275,11 @@ impl App {
         if let Some(ts) = session.last_synced_at() {
             self.last_synced_at = Some(ts.with_timezone(&Local));
         }
-        let items: Vec<DecryptedItem> = session.items().iter().map(DecryptedItem::from_session).collect();
+        let items: Vec<DecryptedItem> = session
+            .items()
+            .iter()
+            .map(DecryptedItem::from_session)
+            .collect();
         let folders: Vec<FolderView> = session
             .folders()
             .iter()
@@ -1304,6 +1345,11 @@ impl App {
                 label: "Identities".into(),
                 kind: FilterKind::Identity,
                 count: active(|i| i.item_type == ItemType::Identity && !i.deleted),
+            },
+            SidebarEntry {
+                label: "SSH Keys".into(),
+                kind: FilterKind::SshKey,
+                count: active(|i| i.item_type == ItemType::SshKey && !i.deleted),
             },
         ];
 
@@ -1500,7 +1546,14 @@ impl App {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+        self.status_sticky = false;
         self.status_expires = Some(Instant::now() + Duration::from_secs(4));
+    }
+
+    fn set_sticky_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_sticky = true;
+        self.status_expires = None;
     }
 
     fn mark_synced(&mut self) {
@@ -1538,6 +1591,7 @@ impl App {
 
     fn show_last_synced_status(&mut self) {
         self.status = self.vault_idle_status();
+        self.status_sticky = true;
         self.status_expires = None;
     }
 
@@ -1605,6 +1659,19 @@ impl App {
         self.busy = false;
     }
 
+    pub fn toggle_reveal(&mut self) {
+        if self.reveal_secrets {
+            self.reveal_secrets = false;
+            self.reveal_until = None;
+            self.set_status("Secrets hidden");
+        } else {
+            self.reveal_secrets = true;
+            self.reveal_until = Some(Instant::now() + Duration::from_secs(15));
+            self.set_status("Secrets revealed (15s)");
+        }
+        self.touch();
+    }
+
     pub fn copy_field(&mut self, kind: ClipboardKind) {
         let Some(item) = self.selected_decrypted().cloned() else {
             self.set_status("No item selected");
@@ -1620,9 +1687,7 @@ impl App {
                     ClipboardKind::Username => session
                         .copy_username(&item.id)
                         .map(|_| "Username".to_string()),
-                    ClipboardKind::Totp => session
-                        .copy_totp(&item.id)
-                        .map(|code| format!("TOTP {code}")),
+                    ClipboardKind::Totp => session.copy_totp(&item.id).map(|_| "TOTP".to_string()),
                     ClipboardKind::Uri => {
                         let Some(uri) = item.primary_uri().map(str::to_string) else {
                             self.set_status("No URI on this item");
@@ -1650,7 +1715,10 @@ impl App {
         let value = match kind {
             ClipboardKind::Password => item.password.clone(),
             ClipboardKind::Username => item.username.clone(),
-            ClipboardKind::Totp => item.totp.clone(),
+            ClipboardKind::Totp => item
+                .totp
+                .as_deref()
+                .and_then(|s| vault_session::totp_from_secret(s).ok()),
             ClipboardKind::Uri => item.primary_uri().map(str::to_string),
         };
         let Some(value) = value.filter(|s| !s.is_empty()) else {
@@ -1673,7 +1741,7 @@ impl App {
         let label = match kind {
             ClipboardKind::Password => "Password",
             ClipboardKind::Username => "Username",
-            ClipboardKind::Totp => "TOTP secret",
+            ClipboardKind::Totp => "TOTP",
             ClipboardKind::Uri => "URI",
         };
         self.set_status(format!(
@@ -1751,6 +1819,44 @@ impl App {
             name: item.name.clone(),
         };
         self.touch();
+    }
+
+    pub fn in_trash(&self) -> bool {
+        matches!(self.current_filter(), FilterKind::Trash)
+    }
+
+    pub async fn restore_selected(&mut self) {
+        let Some(item) = self.selected_decrypted().cloned() else {
+            self.set_status("No item selected");
+            return;
+        };
+        if !item.deleted {
+            self.set_status("Item is not in trash");
+            return;
+        }
+        if self.using_mock {
+            if let Some(i) = self.items.iter_mut().find(|i| i.id == item.id) {
+                i.deleted = false;
+            }
+            self.rebuild_sidebar();
+            self.recompute_visible();
+            self.set_status("Restored (mock)");
+            self.touch();
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        self.busy = true;
+        match session.restore(&item.id).await {
+            Ok(()) => {
+                self.reload_from_session();
+                self.set_status("Restored from trash");
+                self.touch();
+            }
+            Err(e) => self.set_status(format!("Restore failed: {e}")),
+        }
+        self.busy = false;
     }
 
     pub fn open_folder_form(&mut self) {
@@ -1875,7 +1981,15 @@ impl App {
                     notes: draft.notes.clone(),
                     card_number: None,
                     card_brand: None,
+                    card_exp_month: None,
+                    card_exp_year: None,
+                    card_code: None,
                     identity_name: None,
+                    ssh_private_key: None,
+                    ssh_public_key: None,
+                    ssh_fingerprint: None,
+                    has_item_key: false,
+                    reprompt: false,
                 });
                 self.set_status("Login created (mock)");
             }
@@ -1938,11 +2052,26 @@ impl App {
             return;
         };
         self.busy = true;
-        match session.soft_delete(&id).await {
+        let permanent = self
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.deleted)
+            .unwrap_or(false);
+        let result = if permanent {
+            session.hard_delete(&id).await
+        } else {
+            session.soft_delete(&id).await
+        };
+        match result {
             Ok(()) => {
                 self.reload_from_session();
                 self.close_overlay();
-                self.set_status("Moved to trash");
+                self.set_status(if permanent {
+                    "Permanently deleted"
+                } else {
+                    "Moved to trash"
+                });
                 self.touch();
             }
             Err(e) => self.set_status(format!("Delete failed: {e}")),
@@ -2012,7 +2141,10 @@ impl App {
 
         if insert {
             if let Some(mut form) = self.item_form_backup.take() {
-                if let Overlay::ItemForm { password, field, .. } = &mut form {
+                if let Overlay::ItemForm {
+                    password, field, ..
+                } = &mut form
+                {
                     *password = preview;
                     *field = EditField::Password;
                 }
@@ -2040,15 +2172,8 @@ impl App {
             let was_unlocked = session.status() == SessionStatus::Unlocked;
             session.tick();
             if was_unlocked && session.status() == SessionStatus::Locked {
-                self.items.clear();
-                self.folders.clear();
-                self.sidebar.clear();
-                self.visible.clear();
-                self.overlay = Overlay::None;
-                self.searching = false;
-                self.screen = Screen::Unlock;
-                self.locked_at = Some(Instant::now());
-                self.set_status("Auto-locked after idle");
+                self.lock();
+                self.set_sticky_status("Auto-locked after idle");
             }
         }
 
@@ -2060,14 +2185,22 @@ impl App {
             .retain(|_, parked| Self::mock_parked_still_open(parked));
 
         if let Some(exp) = self.status_expires {
-            if now >= exp && !self.status.starts_with("Locked") && !self.busy {
+            if now >= exp && !self.status_sticky && !self.busy {
                 self.status = match self.screen {
                     Screen::Vault => self.vault_idle_status(),
                     Screen::Login => "Enter credentials to continue".into(),
                     Screen::TwoFactor => "Enter your two-factor code".into(),
                     Screen::Unlock => "Enter master password to unlock".into(),
                 };
+                self.status_sticky = self.screen == Screen::Vault;
                 self.status_expires = None;
+            }
+        }
+
+        if let Some(until) = self.reveal_until {
+            if now >= until {
+                self.reveal_secrets = false;
+                self.reveal_until = None;
             }
         }
 
@@ -2087,7 +2220,7 @@ impl App {
                 let timeout = Duration::from_secs(mins.saturating_mul(60));
                 if now.duration_since(self.last_activity) >= timeout {
                     self.lock();
-                    self.set_status(format!("Auto-locked after {mins}m idle"));
+                    self.set_sticky_status(format!("Auto-locked after {mins}m idle"));
                 }
             }
         }
@@ -2120,8 +2253,13 @@ impl App {
     }
 
     pub fn totp_display(&self) -> Option<String> {
-        let id = self.selected_decrypted()?.id.clone();
-        self.session.as_ref().and_then(|s| s.totp_now(&id))
+        let item = self.selected_decrypted()?;
+        if let Some(session) = self.session.as_ref() {
+            return session.totp_now(&item.id);
+        }
+        item.totp
+            .as_deref()
+            .and_then(|s| vault_session::totp_from_secret(s).ok())
     }
 }
 

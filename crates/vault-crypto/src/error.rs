@@ -18,6 +18,8 @@ pub enum CryptoError {
     InvalidKeyLength,
     #[error("KDF failed: {0}")]
     Kdf(String),
+    #[error("insufficient KDF parameters: {0}")]
+    InsufficientKdfParameters(String),
     #[error("RSA error: {0}")]
     Rsa(String),
     #[error("base64 decode error")]

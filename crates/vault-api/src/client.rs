@@ -18,7 +18,19 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>) -> Result<Self> {
+        let raw = base_url.into();
+        let base_url = normalize_server_url(&raw)?;
+        Ok(Self {
+            base_url,
+            device_id: Uuid::new_v4().to_string(),
+            device_name: "bitwarden-tui".to_string(),
+        })
+    }
+
+    /// Build config, falling back to a trimmed URL only for tests that need a
+    /// placeholder before a real URL is known.
+    pub fn new_unchecked(base_url: impl Into<String>) -> Self {
         let raw = base_url.into();
         let base_url = normalize_server_url(&raw)
             .unwrap_or_else(|_| raw.trim().trim_end_matches('/').to_string());
@@ -62,6 +74,31 @@ pub fn normalize_server_url(raw: &str) -> Result<String> {
     Ok(out)
 }
 
+/// True for `http://` URLs whose host is not loopback / localhost.
+pub fn is_insecure_http(url: &str) -> bool {
+    let trimmed = url.trim();
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    let Ok(parsed) = url::Url::parse(&with_scheme) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        None => true,
+        Some(url::Host::Domain(host)) => {
+            let h = host.to_ascii_lowercase();
+            h != "localhost" && h != "localhost.localdomain"
+        }
+        Some(url::Host::Ipv4(ip)) => !ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => !ip.is_loopback(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +117,14 @@ mod tests {
             normalize_server_url("http://127.0.0.1:8080/").unwrap(),
             "http://127.0.0.1:8080"
         );
+    }
+
+    #[test]
+    fn insecure_http_flags_remote_only() {
+        assert!(is_insecure_http("http://vault.example.com"));
+        assert!(!is_insecure_http("https://vault.example.com"));
+        assert!(!is_insecure_http("http://127.0.0.1:8080"));
+        assert!(!is_insecure_http("http://localhost:8080"));
     }
 }
 
@@ -140,9 +185,7 @@ impl VaultClient {
 
     pub fn set_tokens(&mut self, access: String, refresh: Option<String>) {
         self.access_token = Some(access);
-        if let Some(r) = refresh {
-            self.refresh_token = Some(r);
-        }
+        self.refresh_token = refresh;
     }
 
     pub fn clear_tokens(&mut self) {
@@ -260,9 +303,54 @@ impl VaultClient {
             .clone()
             .ok_or(ApiError::NotAuthenticated)?;
         let form = [
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh.as_str()),
-            ("client_id", "cli"),
+            ("grant_type", "refresh_token".to_string()),
+            ("refresh_token", refresh),
+            ("client_id", "cli".to_string()),
+            ("deviceType", DEVICE_TYPE.to_string()),
+            ("deviceIdentifier", self.config.device_id.clone()),
+            ("deviceName", self.config.device_name.clone()),
+        ];
+        let resp = self
+            .http
+            .post(self.identity("/connect/token"))
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .form(&form)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            if matches!(status.as_u16(), 400 | 401) {
+                self.clear_tokens();
+            }
+            return Err(ApiError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        let token: TokenResponse = self.json(resp).await?;
+        self.access_token = Some(token.access_token.clone());
+        // Always assign refresh (including None) so rotation clears stale tokens.
+        if token.refresh_token.is_some() {
+            self.refresh_token = token.refresh_token.clone();
+        }
+        Ok(token)
+    }
+
+    /// API-key login (`client_credentials`) for headless / automation use.
+    pub async fn login_api_key(
+        &mut self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<TokenResponse> {
+        let form = [
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("scope", "api"),
+            ("deviceType", DEVICE_TYPE),
+            ("deviceIdentifier", self.config.device_id.as_str()),
+            ("deviceName", self.config.device_name.as_str()),
         ];
         let resp = self
             .http
@@ -272,11 +360,32 @@ impl VaultClient {
             .send()
             .await?;
         let token: TokenResponse = self.json(resp).await?;
-        self.access_token = Some(token.access_token.clone());
-        if let Some(ref r) = token.refresh_token {
-            self.refresh_token = Some(r.clone());
-        }
+        self.set_tokens(token.access_token.clone(), token.refresh_token.clone());
         Ok(token)
+    }
+
+    /// Ask the server to email a 2FA code (provider 1).
+    pub async fn send_email_login_2fa(
+        &self,
+        email: &str,
+        master_password_hash: &str,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            email: &'a str,
+            master_password_hash: &'a str,
+        }
+        let resp = self
+            .http
+            .post(self.api("/two-factor/send-email-login"))
+            .json(&Body {
+                email,
+                master_password_hash,
+            })
+            .send()
+            .await?;
+        self.empty(resp).await
     }
 
     /// Step 1 of modern registration: obtain email verification JWT (returned
@@ -334,8 +443,9 @@ impl VaultClient {
             return Ok(());
         }
         let body = resp.text().await.unwrap_or_default();
-        if body.to_lowercase().contains("already") || body.to_lowercase().contains("taken") {
-            return Ok(());
+        let lower = body.to_lowercase();
+        if lower.contains("already") || lower.contains("taken") {
+            return Err(ApiError::UserExists);
         }
         Err(ApiError::Api {
             status: status.as_u16(),
@@ -387,6 +497,22 @@ impl VaultClient {
             .send()
             .await?;
         self.json(resp).await
+    }
+
+    /// Update only folder/favorite without rewriting cipher payload.
+    pub async fn update_cipher_partial(
+        &self,
+        id: &str,
+        partial: &CipherPartialRequest,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .put(self.api(&format!("/ciphers/{id}/partial")))
+            .header(AUTHORIZATION, self.bearer()?)
+            .json(partial)
+            .send()
+            .await?;
+        self.empty(resp).await
     }
 
     pub async fn delete_cipher(&self, id: &str) -> Result<()> {

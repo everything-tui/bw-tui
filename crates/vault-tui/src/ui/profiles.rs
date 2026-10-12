@@ -23,9 +23,7 @@ pub fn draw_profile_manager(frame: &mut Frame, app: &App) {
     };
     match mode {
         ProfileManagerMode::List => draw_list(frame, app, *selected),
-        ProfileManagerMode::Create { name, error } => {
-            draw_create(frame, name, error.as_deref())
-        }
+        ProfileManagerMode::Create { name, error } => draw_create(frame, name, error.as_deref()),
         ProfileManagerMode::Edit {
             name,
             server_url,
@@ -43,9 +41,7 @@ pub fn draw_profile_manager(frame: &mut Frame, app: &App) {
             *field,
             error.as_deref(),
         ),
-        ProfileManagerMode::ConfirmDelete { id, name } => {
-            draw_confirm_delete(frame, app, id, name)
-        }
+        ProfileManagerMode::ConfirmDelete { id, name } => draw_confirm_delete(frame, app, id, name),
     }
 }
 
@@ -94,8 +90,26 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize) {
     }
 
     let width = inner.width as usize;
+    let inner_lines = inner.height as usize;
+    let lines_per_profile = 3usize;
+    let max_visible = (inner_lines / lines_per_profile).max(1);
+    let n = app.profiles.profiles.len();
+    let window_start = if n <= max_visible {
+        0
+    } else {
+        let half = max_visible / 2;
+        selected
+            .saturating_sub(half)
+            .min(n.saturating_sub(max_visible))
+    };
+    let window_end = (window_start + max_visible).min(n);
+
     let mut lines: Vec<Line> = Vec::new();
-    for (i, p) in app.profiles.profiles.iter().enumerate() {
+    for (i, p) in app.profiles.profiles[window_start..window_end]
+        .iter()
+        .enumerate()
+    {
+        let i = window_start + i;
         let is_sel = i == selected;
         let is_active = p.id == app.active_profile_id;
         let is_open = app.profile_is_open(&p.id);
@@ -116,7 +130,11 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize) {
         } else {
             "not signed in"
         };
-        let email = if p.email.is_empty() { "—" } else { p.email.as_str() };
+        let email = if p.email.is_empty() {
+            "—"
+        } else {
+            p.email.as_str()
+        };
         let server = if p.server_url.is_empty() {
             "—"
         } else {
@@ -146,10 +164,7 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize) {
                     spans.push(Span::styled(badge, badge_style));
                     let pad = rest - badge.len();
                     if pad > 0 {
-                        spans.push(Span::styled(
-                            " ".repeat(pad),
-                            Style::default().bg(bg),
-                        ));
+                        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
                     }
                 } else {
                     spans.push(Span::styled(" ".repeat(rest), Style::default().bg(bg)));
@@ -161,7 +176,7 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize) {
             lines.push(Line::from(Span::styled(title, name_style)));
         }
         lines.push(Line::from(Span::styled(meta, meta_style)));
-        if i + 1 < app.profiles.profiles.len() {
+        if i + 1 < window_end {
             lines.push(Line::from(Span::styled(
                 "─".repeat(width),
                 Style::default().fg(Color::Rgb(55, 55, 70)),

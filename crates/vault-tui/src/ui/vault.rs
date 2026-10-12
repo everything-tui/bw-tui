@@ -4,8 +4,8 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, HighlightSpacing, List, ListItem, ListState, Paragraph,
-    Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+    Block, BorderType, Borders, Cell, HighlightSpacing, List, ListItem, ListState, Paragraph, Row,
+    Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
 };
 use ratatui::Frame;
 
@@ -68,7 +68,11 @@ fn pane(title: &str, focused: bool) -> Block<'static> {
 }
 
 fn draw_search(frame: &mut Frame, area: Rect, app: &App) {
-    let title = if app.searching { " Search " } else { " Filter " };
+    let title = if app.searching {
+        " Search "
+    } else {
+        " Filter "
+    };
     let text = Line::from(vec![
         Span::styled("/ ", Style::default().fg(ACCENT)),
         Span::styled(app.search_query.clone(), Style::default().fg(FG)),
@@ -124,8 +128,11 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == FocusPane::Items;
     let count = app.visible.len();
     let block = pane(" Items ", focused).title_top(
-        Line::from(Span::styled(format!(" {count} "), Style::default().fg(MUTED)))
-            .right_aligned(),
+        Line::from(Span::styled(
+            format!(" {count} "),
+            Style::default().fg(MUTED),
+        ))
+        .right_aligned(),
     );
 
     if app.visible.is_empty() {
@@ -172,7 +179,9 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
         width: area.width.saturating_sub(4),
         ..area
     };
-    let cols = Layout::horizontal(widths.clone()).spacing(1).split(row_area);
+    let cols = Layout::horizontal(widths.clone())
+        .spacing(1)
+        .split(row_area);
     let name_w = cols[2].width as usize;
     let details_w = if wide { cols[3].width as usize } else { 0 };
 
@@ -183,7 +192,10 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
         .map(|(i, &idx)| {
             let item = &app.items[idx];
             let mut cells = vec![
-                Cell::from(Span::styled("●", Style::default().fg(type_color(item.item_type)))),
+                Cell::from(Span::styled(
+                    "●",
+                    Style::default().fg(type_color(item.item_type)),
+                )),
                 Cell::from(Span::styled(
                     if item.favorite { "★" } else { " " },
                     Style::default().fg(FAV),
@@ -292,15 +304,27 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     match item.item_type {
         ItemType::Login => {
             kv(&mut lines, width, "Username", item.username.as_deref(), "y");
-            kv(
-                &mut lines,
-                width,
-                "Password",
-                item.password.as_deref().map(|_| "••••••••••"),
-                "c",
-            );
-            let totp_label =
-                totp_now.or_else(|| item.totp.as_ref().map(|_| "configured".to_string()));
+            let pw = if app.reveal_secrets {
+                item.password.as_deref()
+            } else {
+                item.password.as_deref().map(|_| "••••••••••")
+            };
+            kv(&mut lines, width, "Password", pw, "c");
+            let totp_label = if let Some(code) = totp_now {
+                let secs = 30u64.saturating_sub(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() % 30)
+                        .unwrap_or(0),
+                );
+                if app.reveal_secrets {
+                    Some(format!("{code} ({secs}s) · r hide"))
+                } else {
+                    Some(format!("•••••• ({secs}s) · r reveal · t copy"))
+                }
+            } else {
+                item.totp.as_ref().map(|_| "configured".to_string())
+            };
             kv(&mut lines, width, "TOTP", totp_label.as_deref(), "t");
             if item.uris.is_empty() {
                 kv(&mut lines, width, "Website", None, "u");
@@ -312,13 +336,43 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         }
         ItemType::Card => {
             kv(&mut lines, width, "Brand", item.card_brand.as_deref(), "");
-            let masked = item.card_number.as_deref().map(mask_card);
-            kv(&mut lines, width, "Number", masked.as_deref(), "");
+            let masked_owned = item.card_number.as_deref().map(mask_card);
+            let number = if app.reveal_secrets {
+                item.card_number.as_deref()
+            } else {
+                masked_owned.as_deref()
+            };
+            kv(&mut lines, width, "Number", number, "");
+            if let (Some(m), Some(y)) = (&item.card_exp_month, &item.card_exp_year) {
+                kv(&mut lines, width, "Expires", Some(&format!("{m}/{y}")), "");
+            }
+            let code = if app.reveal_secrets {
+                item.card_code.as_deref()
+            } else {
+                item.card_code.as_deref().map(|_| "***")
+            };
+            kv(&mut lines, width, "CVC", code, "");
         }
         ItemType::Identity => {
             kv(&mut lines, width, "Name", item.identity_name.as_deref(), "");
         }
-        ItemType::SecureNote | ItemType::SshKey | ItemType::Unknown => {}
+        ItemType::SshKey => {
+            kv(
+                &mut lines,
+                width,
+                "Public key",
+                item.ssh_public_key.as_deref(),
+                "",
+            );
+            kv(
+                &mut lines,
+                width,
+                "Fingerprint",
+                item.ssh_fingerprint.as_deref(),
+                "",
+            );
+        }
+        ItemType::SecureNote | ItemType::Unknown => {}
     }
 
     if let Some(notes) = item.notes.as_deref().filter(|n| !n.trim().is_empty()) {
@@ -411,10 +465,7 @@ fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" {profile} "),
-            Style::default().fg(MUTED),
-        ),
+        Span::styled(format!(" {profile} "), Style::default().fg(MUTED)),
         Span::styled(format!(" {}", app.status), Style::default().fg(FG)),
     ];
     let right = vec![
@@ -432,7 +483,9 @@ fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
         .map(|s| s.content.chars().count())
         .sum();
     let mut spans = left;
-    spans.push(Span::raw(" ".repeat((area.width as usize).saturating_sub(used))));
+    spans.push(Span::raw(
+        " ".repeat((area.width as usize).saturating_sub(used)),
+    ));
     spans.extend(right);
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(STATUS_BG)),
@@ -465,6 +518,7 @@ fn filter_glyph(kind: &FilterKind) -> (&'static str, Color) {
         FilterKind::SecureNote => ("●", type_color(ItemType::SecureNote)),
         FilterKind::Card => ("●", type_color(ItemType::Card)),
         FilterKind::Identity => ("●", type_color(ItemType::Identity)),
+        FilterKind::SshKey => ("●", type_color(ItemType::SshKey)),
         FilterKind::Folder(_) => ("▸", MUTED),
         FilterKind::NoFolder => ("▹", MUTED),
         FilterKind::Trash => ("✕", DANGER),

@@ -24,14 +24,14 @@ impl ItemType {
         }
     }
 
-    pub fn as_u8(self) -> u8 {
+    pub fn as_u8(self) -> Option<u8> {
         match self {
-            Self::Login => 1,
-            Self::SecureNote => 2,
-            Self::Card => 3,
-            Self::Identity => 4,
-            Self::SshKey => 5,
-            Self::Unknown => 1,
+            Self::Login => Some(1),
+            Self::SecureNote => Some(2),
+            Self::Card => Some(3),
+            Self::Identity => Some(4),
+            Self::SshKey => Some(5),
+            Self::Unknown => None,
         }
     }
 
@@ -74,7 +74,12 @@ pub struct DecryptedItem {
     pub identity_email: Option<String>,
     pub identity_phone: Option<String>,
     pub identity_username: Option<String>,
+    pub ssh_private_key: Option<String>,
+    pub ssh_public_key: Option<String>,
+    pub ssh_fingerprint: Option<String>,
     pub revision_date: Option<String>,
+    /// Encrypted item-level key present → edits must use that key.
+    pub has_item_key: bool,
 }
 
 impl DecryptedItem {
@@ -150,11 +155,19 @@ impl PersistedAuth {
     pub fn to_kdf_params(&self) -> Option<vault_crypto::KdfParams> {
         let iterations = self.kdf_iterations?;
         Some(match self.kdf.unwrap_or(0) {
-            1 => vault_crypto::KdfParams::Argon2id {
-                iterations,
-                memory_kb: self.kdf_memory.unwrap_or(64 * 1024),
-                parallelism: self.kdf_parallelism.unwrap_or(4),
-            },
+            1 => {
+                // Persist/load as MiB. Migrate legacy KiB values (>1024).
+                let raw = self
+                    .kdf_memory
+                    .unwrap_or(vault_crypto::ARGON2_DEFAULT_MEMORY_MIB);
+                vault_crypto::KdfParams::Argon2id {
+                    iterations,
+                    memory_mib: vault_crypto::KdfParams::migrate_memory_mib(raw),
+                    parallelism: self
+                        .kdf_parallelism
+                        .unwrap_or(vault_crypto::ARGON2_DEFAULT_PARALLELISM),
+                }
+            }
             _ => vault_crypto::KdfParams::Pbkdf2 { iterations },
         })
     }
@@ -169,12 +182,13 @@ impl PersistedAuth {
             }
             vault_crypto::KdfParams::Argon2id {
                 iterations,
-                memory_kb,
+                memory_mib,
                 parallelism,
             } => {
                 self.kdf = Some(1);
                 self.kdf_iterations = Some(*iterations);
-                self.kdf_memory = Some(*memory_kb);
+                // Store MiB (API unit).
+                self.kdf_memory = Some(*memory_mib);
                 self.kdf_parallelism = Some(*parallelism);
             }
         }
@@ -186,6 +200,8 @@ pub struct VaultIndex {
     pub folders: Vec<DecryptedFolder>,
     pub items: Vec<DecryptedItem>,
     pub org_keys: HashMap<String, vault_crypto::OrgKey>,
+    /// Raw encrypted ciphers from last sync (for round-trip-safe updates).
+    pub raw_ciphers: HashMap<String, vault_api::Cipher>,
 }
 
 /// Fields for creating/editing a login (plaintext, encrypted by session).

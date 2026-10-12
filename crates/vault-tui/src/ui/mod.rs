@@ -5,7 +5,10 @@ mod layout;
 mod login;
 mod modals;
 mod profiles;
+mod theme;
 mod vault;
+
+pub use theme::theme;
 
 use ratatui::Frame;
 
