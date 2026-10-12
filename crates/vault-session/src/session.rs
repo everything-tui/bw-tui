@@ -17,6 +17,10 @@ use crate::decrypt::build_index;
 use crate::error::{Result, SessionError};
 use crate::models::*;
 use crate::paths::app_data_dir;
+use crate::secure_storage::{
+    delete_refresh_token_best_effort, get_refresh_token, profile_id_from_data_dir,
+    set_refresh_token,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
@@ -521,10 +525,27 @@ impl Session {
         let Some(refresh) = self.client.refresh_token() else {
             return Ok(());
         };
+
+        let profile_id = profile_id_from_data_dir(&self.data_dir);
+        let disk_refresh = match profile_id.as_deref() {
+            Some(id) => match set_refresh_token(id, refresh) {
+                Ok(()) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        profile_id = %id,
+                        error = %e,
+                        "secure storage unavailable; storing refresh token on disk"
+                    );
+                    Some(refresh.to_string())
+                }
+            },
+            None => Some(refresh.to_string()),
+        };
+
         let auth = PersistedAuth {
             server_url: self.client.base_url().to_string(),
             email: email.clone(),
-            refresh_token: refresh.to_string(),
+            refresh_token: disk_refresh,
             device_id: self.client.device_id().to_string(),
             protected_key: self.protected_key.clone(),
             private_key: self.private_key_enc.clone(),
@@ -537,10 +558,33 @@ impl Session {
         Ok(())
     }
 
-    /// Remove persisted refresh-token session (`auth.json`) under `data_dir`.
+    /// Remove persisted session (`auth.json` + secure-storage refresh token) under `data_dir`.
     pub fn clear_persisted_auth(data_dir: &Path) {
+        if let Some(id) = profile_id_from_data_dir(data_dir) {
+            delete_refresh_token_best_effort(&id);
+        }
         let path = data_dir.join("auth.json");
         let _ = std::fs::remove_file(path);
+    }
+
+    fn resolve_refresh_token(data_dir: &Path, auth: &PersistedAuth) -> Option<String> {
+        if let Some(id) = profile_id_from_data_dir(data_dir) {
+            match get_refresh_token(&id) {
+                Ok(Some(t)) if !t.is_empty() => return Some(t),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        profile_id = %id,
+                        error = %e,
+                        "failed to read refresh token from secure storage; trying disk"
+                    );
+                }
+            }
+        }
+        auth.refresh_token
+            .as_ref()
+            .filter(|t| !t.is_empty())
+            .cloned()
     }
 
     /// Restore a locked session from `auth.json` in `data_dir` if the server URL matches.
@@ -567,18 +611,23 @@ impl Session {
         let json = std::fs::read_to_string(&path)?;
         let auth: PersistedAuth =
             serde_json::from_str(&json).map_err(|e| SessionError::Other(e.to_string()))?;
+        let Some(refresh) = Self::resolve_refresh_token(&data_dir, &auth) else {
+            // Metadata without a usable refresh token — treat as logged out.
+            Self::clear_persisted_auth(&data_dir);
+            return Ok(None);
+        };
         let server_url = auth.server_url.clone();
         let mut config = ClientConfig::new(&server_url);
         config.device_id = auth.device_id;
         let mut client = VaultClient::new(config)?;
-        client.set_tokens(String::new(), Some(auth.refresh_token));
+        client.set_tokens(String::new(), Some(refresh));
         // refresh to get access token
         if client.refresh().await.is_err() {
             // Stale refresh token — drop it so we do not loop on a dead session.
-            let _ = std::fs::remove_file(path);
+            Self::clear_persisted_auth(&data_dir);
             return Ok(None);
         }
-        // Re-persist in case the server rotated the refresh token.
+        // Re-persist in case the server rotated the refresh token (and upgrade disk → keyring).
         let session = Self {
             client,
             email: Some(auth.email),
@@ -685,14 +734,20 @@ fn totp_code(secret_or_uri: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::models::PersistedAuth;
+    use crate::secure_storage::{
+        with_refresh_token_store_for_tests, FailingRefreshTokenStore, MemoryRefreshTokenStore,
+        RefreshTokenStore,
+    };
 
-    fn write_dummy_auth(dir: &Path) {
+    fn write_dummy_auth(dir: &Path, refresh: Option<&str>) {
         let auth = PersistedAuth {
             server_url: "http://127.0.0.1:8080".into(),
             email: "a@b.c".into(),
-            refresh_token: "tok".into(),
+            refresh_token: refresh.map(str::to_string),
             device_id: "dev".into(),
             protected_key: None,
             private_key: None,
@@ -703,6 +758,11 @@ mod tests {
             serde_json::to_string_pretty(&auth).unwrap(),
         )
         .unwrap();
+    }
+
+    fn read_auth(dir: &Path) -> PersistedAuth {
+        let json = std::fs::read_to_string(dir.join("auth.json")).unwrap();
+        serde_json::from_str(&json).unwrap()
     }
 
     #[test]
@@ -716,28 +776,32 @@ mod tests {
 
     #[test]
     fn clear_persisted_auth_only_touches_given_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let a = tmp.path().join("a");
-        let b = tmp.path().join("b");
-        write_dummy_auth(&a);
-        write_dummy_auth(&b);
-        Session::clear_persisted_auth(&a);
-        assert!(!a.join("auth.json").exists());
-        assert!(b.join("auth.json").exists());
+        with_refresh_token_store_for_tests(Arc::new(MemoryRefreshTokenStore::new()), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let a = tmp.path().join("a");
+            let b = tmp.path().join("b");
+            write_dummy_auth(&a, Some("tok-a"));
+            write_dummy_auth(&b, Some("tok-b"));
+            Session::clear_persisted_auth(&a);
+            assert!(!a.join("auth.json").exists());
+            assert!(b.join("auth.json").exists());
+        });
     }
 
     #[test]
     fn logout_clears_only_session_auth_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let a = tmp.path().join("a");
-        let b = tmp.path().join("b");
-        write_dummy_auth(&a);
-        write_dummy_auth(&b);
-        let mut session = Session::with_data_dir("http://127.0.0.1:8080", a.clone()).unwrap();
-        session.logout();
-        assert!(!a.join("auth.json").exists());
-        assert!(b.join("auth.json").exists());
-        assert_eq!(session.status(), SessionStatus::LoggedOut);
+        with_refresh_token_store_for_tests(Arc::new(MemoryRefreshTokenStore::new()), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let a = tmp.path().join("a");
+            let b = tmp.path().join("b");
+            write_dummy_auth(&a, Some("tok-a"));
+            write_dummy_auth(&b, Some("tok-b"));
+            let mut session = Session::with_data_dir("http://127.0.0.1:8080", a.clone()).unwrap();
+            session.logout();
+            assert!(!a.join("auth.json").exists());
+            assert!(b.join("auth.json").exists());
+            assert_eq!(session.status(), SessionStatus::LoggedOut);
+        });
     }
 
     #[tokio::test]
@@ -747,5 +811,93 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let restored = Session::try_restore_saved(dir).await.unwrap();
         assert!(restored.is_none());
+    }
+
+    #[test]
+    fn persist_auth_uses_secure_storage_and_omits_disk_token() {
+        let mem = Arc::new(MemoryRefreshTokenStore::new());
+        with_refresh_token_store_for_tests(mem.clone(), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("profiles/work");
+            let mut session = Session::with_data_dir("http://127.0.0.1:8080", dir.clone()).unwrap();
+            session.email = Some("u@ex.com".into());
+            session
+                .client
+                .set_tokens("access".into(), Some("refresh-secret".into()));
+            session.persist_auth().unwrap();
+
+            let auth = read_auth(&dir);
+            assert!(auth.refresh_token.is_none());
+            assert_eq!(
+                mem.get("work").unwrap().as_deref(),
+                Some("refresh-secret")
+            );
+        });
+    }
+
+    #[test]
+    fn persist_auth_falls_back_to_disk_when_secure_storage_fails() {
+        with_refresh_token_store_for_tests(Arc::new(FailingRefreshTokenStore), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("profiles/home");
+            let mut session = Session::with_data_dir("http://127.0.0.1:8080", dir.clone()).unwrap();
+            session.email = Some("u@ex.com".into());
+            session
+                .client
+                .set_tokens("access".into(), Some("disk-tok".into()));
+            session.persist_auth().unwrap();
+
+            let auth = read_auth(&dir);
+            assert_eq!(auth.refresh_token.as_deref(), Some("disk-tok"));
+        });
+    }
+
+    #[test]
+    fn resolve_refresh_prefers_secure_storage_over_disk() {
+        let mem = Arc::new(MemoryRefreshTokenStore::new());
+        with_refresh_token_store_for_tests(mem.clone(), || {
+            mem.set("work", "from-keyring").unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("profiles/work");
+            write_dummy_auth(&dir, Some("from-disk"));
+            let auth = read_auth(&dir);
+            let resolved = Session::resolve_refresh_token(&dir, &auth).unwrap();
+            assert_eq!(resolved, "from-keyring");
+        });
+    }
+
+    #[test]
+    fn resolve_refresh_uses_legacy_disk_token() {
+        with_refresh_token_store_for_tests(Arc::new(MemoryRefreshTokenStore::new()), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("profiles/work");
+            // Legacy plaintext string in JSON
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("auth.json"),
+                r#"{"server_url":"http://127.0.0.1:8080","email":"a@b.c","refresh_token":"legacy","device_id":"dev"}"#,
+            )
+            .unwrap();
+            let auth = read_auth(&dir);
+            assert_eq!(auth.refresh_token.as_deref(), Some("legacy"));
+            assert_eq!(
+                Session::resolve_refresh_token(&dir, &auth).as_deref(),
+                Some("legacy")
+            );
+        });
+    }
+
+    #[test]
+    fn clear_removes_secure_storage_entry() {
+        let mem = Arc::new(MemoryRefreshTokenStore::new());
+        with_refresh_token_store_for_tests(mem.clone(), || {
+            mem.set("work", "tok").unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("profiles/work");
+            write_dummy_auth(&dir, None);
+            Session::clear_persisted_auth(&dir);
+            assert!(!dir.join("auth.json").exists());
+            assert_eq!(mem.get("work").unwrap(), None);
+        });
     }
 }

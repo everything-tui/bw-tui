@@ -129,7 +129,9 @@ pub struct DecryptedFolder {
 pub struct PersistedAuth {
     pub server_url: String,
     pub email: String,
-    pub refresh_token: String,
+    /// Present only for disk fallback / legacy files. Prefer OS secure storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
     pub device_id: String,
     pub protected_key: Option<String>,
     pub private_key: Option<String>,
