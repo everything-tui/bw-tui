@@ -5,6 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
+use vault_session::TimeoutAction;
 
 use crate::app::{App, Overlay, ProfileEditField, ProfileManagerMode};
 use crate::profiles::{format_auto_lock_label, profile_has_auth};
@@ -30,16 +31,25 @@ pub fn draw_profile_manager(frame: &mut Frame, app: &App) {
             email,
             auto_lock_input,
             clipboard_clear_input,
+            timeout_action,
+            timeout_on_startup,
+            lock_on_system_lock,
             field,
             error,
-            ..
+            id,
         } => draw_edit(
             frame,
-            name,
-            server_url,
-            email,
-            auto_lock_input,
-            clipboard_clear_input,
+            EditView {
+                name,
+                server_url,
+                email,
+                auto_lock_input,
+                clipboard_clear_input,
+                timeout_action: *timeout_action,
+                timeout_on_startup: *timeout_on_startup,
+                lock_on_system_lock: *lock_on_system_lock,
+                policy_note: policy_note(app, id),
+            },
             *field,
             error.as_deref(),
         ),
@@ -231,19 +241,58 @@ fn draw_create(frame: &mut Frame, name: &str, error: Option<&str>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_edit(
+struct EditView<'a> {
+    name: &'a str,
+    server_url: &'a str,
+    email: &'a str,
+    auto_lock_input: &'a str,
+    clipboard_clear_input: &'a str,
+    timeout_action: TimeoutAction,
+    timeout_on_startup: bool,
+    lock_on_system_lock: bool,
+    policy_note: Option<String>,
+}
+
+/// Summary of org vault-timeout policy (type 9) for a profile with a live session.
+fn policy_note(app: &App, id: &str) -> Option<String> {
+    let policy = app.vault_timeout_policy_for(id)?;
+    let mut parts = Vec::new();
+    if let Some(m) = policy.max_minutes {
+        parts.push(format!("max {m} min"));
+    }
+    if let Some(a) = policy.action {
+        parts.push(format!("action: {}", a.label()));
+    }
+    Some(format!("Org policy · {}", parts.join(" · ")))
+}
+
+fn draw_toggle(
     frame: &mut Frame,
-    name: &str,
-    server_url: &str,
-    email: &str,
-    auto_lock_input: &str,
-    clipboard_clear_input: &str,
-    field: ProfileEditField,
-    error: Option<&str>,
+    area: ratatui::layout::Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
 ) {
+    let marker = if focused { "▸ " } else { "  " };
+    let label_style = if focused {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(MUTED)
+    };
+    let line = Line::from(vec![
+        Span::styled(marker, label_style),
+        Span::styled(format!("{label}: "), label_style),
+        Span::styled(
+            format!("[{value}]"),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_edit(frame: &mut Frame, v: EditView<'_>, field: ProfileEditField, error: Option<&str>) {
     let area = frame.area();
-    let popup = center_fixed(60, 20, area);
+    let popup = center_fixed(64, 25, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -254,7 +303,7 @@ fn draw_edit(
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " Tab fields · Enter save · Esc back ",
+            " Tab fields · Space/←/→ toggle · Enter save · Esc back ",
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);
@@ -268,6 +317,9 @@ fn draw_edit(
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(1),
         ])
         .split(inner);
@@ -276,49 +328,72 @@ fn draw_edit(
         frame,
         rows[0],
         "Name",
-        name,
+        v.name,
         field == ProfileEditField::Name,
     );
     draw_field(
         frame,
         rows[1],
         "Server URL",
-        server_url,
+        v.server_url,
         field == ProfileEditField::Server,
     );
     draw_field(
         frame,
         rows[2],
         "Email",
-        email,
+        v.email,
         field == ProfileEditField::Email,
     );
     draw_field(
         frame,
         rows[3],
         "Auto-lock (minutes / off)",
-        auto_lock_input,
+        v.auto_lock_input,
         field == ProfileEditField::AutoLock,
     );
     draw_field(
         frame,
         rows[4],
         "Clipboard clear (seconds)",
-        clipboard_clear_input,
+        v.clipboard_clear_input,
         field == ProfileEditField::ClipboardClear,
+    );
+    draw_toggle(
+        frame,
+        rows[5],
+        "On timeout",
+        v.timeout_action.label(),
+        field == ProfileEditField::TimeoutAction,
+    );
+    draw_toggle(
+        frame,
+        rows[6],
+        "Apply timeout action on startup",
+        if v.timeout_on_startup { "on" } else { "off" },
+        field == ProfileEditField::TimeoutOnStartup,
+    );
+    draw_toggle(
+        frame,
+        rows[7],
+        "Lock on system sleep / screen lock",
+        if v.lock_on_system_lock { "on" } else { "off" },
+        field == ProfileEditField::LockOnSystemLock,
     );
     if let Some(err) = error {
         frame.render_widget(
-            Paragraph::new(Span::styled(err, Style::default().fg(ERR))),
-            rows[5],
+            Paragraph::new(Span::styled(err, Style::default().fg(ERR)))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            rows[8],
         );
     } else {
+        let hint = v
+            .policy_note
+            .unwrap_or_else(|| "Idle timeout · clipboard auto-clear (min 5s when applied)".into());
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                "Idle timeout · clipboard auto-clear (min 5s when applied)",
-                Style::default().fg(MUTED),
-            )),
-            rows[5],
+            Paragraph::new(Span::styled(hint, Style::default().fg(MUTED)))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            rows[8],
         );
     }
 }

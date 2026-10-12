@@ -13,8 +13,7 @@ pub fn try_copy_osc52(text: &str) -> bool {
     let encoded = base64_encode(text.as_bytes());
     // `\x1b]52;c;<base64>\x07` — c = system clipboard
     let seq = format!("\x1b]52;c;{encoded}\x07");
-    io::stdout().write_all(seq.as_bytes()).is_ok()
-        && io::stdout().flush().is_ok()
+    io::stdout().write_all(seq.as_bytes()).is_ok() && io::stdout().flush().is_ok()
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

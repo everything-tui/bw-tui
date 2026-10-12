@@ -2,15 +2,15 @@ use std::collections::HashMap;
 
 use vault_api::{Cipher, Collection, Folder, Send, SyncResponse};
 use vault_crypto::{
-    decrypt_bytes, decrypt_private_key, decrypt_with_key, unwrap_org_key,
-    unwrap_org_key_with_user, CryptoError, SymmetricCryptoKey, UserKey,
+    decrypt_bytes, decrypt_private_key, decrypt_with_key, unwrap_org_key, unwrap_org_key_with_user,
+    CryptoError, SymmetricCryptoKey, UserKey,
 };
 
 use crate::error::Result;
 use crate::models::{
     DecryptedCollection, DecryptedField, DecryptedFieldType, DecryptedFolder, DecryptedItem,
-    DecryptedOrganization, DecryptedPasswordHistory, DecryptedSend, DecryptedUri, ItemType,
-    VaultIndex,
+    DecryptedOrganization, DecryptedPasskey, DecryptedPasswordHistory, DecryptedSend, DecryptedUri,
+    ItemType, VaultIndex,
 };
 
 pub fn build_index(sync: &SyncResponse, user_key: &UserKey) -> Result<VaultIndex> {
@@ -55,6 +55,17 @@ pub fn build_index(sync: &SyncResponse, user_key: &UserKey) -> Result<VaultIndex
                 .map(|o| DecryptedOrganization {
                     id: o.id.clone(),
                     name: o.name.clone().unwrap_or_else(|| o.id.clone()),
+                    org_type: o.org_type,
+                    status: o.status,
+                    enabled: o.enabled.unwrap_or(true),
+                    edit_any_collection: o
+                        .permissions
+                        .as_ref()
+                        .is_some_and(|p| p.edit_any_collection),
+                    create_new_collections: o
+                        .permissions
+                        .as_ref()
+                        .is_some_and(|p| p.create_new_collections),
                 })
                 .collect::<Vec<_>>()
         })
@@ -149,6 +160,7 @@ fn empty_item_base(c: &Cipher) -> DecryptedItem {
         ssh_private_key: None,
         ssh_public_key: None,
         ssh_fingerprint: None,
+        passkeys: Vec::new(),
         has_item_key: c.key.is_some(),
     }
 }
@@ -178,6 +190,9 @@ fn decrypt_collection(
         id,
         name,
         organization_id: collection.organization_id.clone(),
+        read_only: collection.read_only,
+        hide_passwords: collection.hide_passwords,
+        manage: collection.manage,
     })
 }
 
@@ -208,6 +223,12 @@ fn decrypt_send(send: &Send, user_key: &UserKey) -> Result<DecryptedSend> {
             None => Some(enc.clone()),
         })
     });
+    let file_name = send.file.as_ref().and_then(|f| {
+        f.file_name.as_ref().and_then(|enc| match key_material {
+            Some(km) => crate::send_crypto::decrypt_send_meta_field(&km, enc).ok(),
+            None => Some(enc.clone()),
+        })
+    });
     Ok(DecryptedSend {
         id,
         access_id: send.access_id.clone(),
@@ -217,6 +238,14 @@ fn decrypt_send(send: &Send, user_key: &UserKey) -> Result<DecryptedSend> {
         send_type: send.send_type,
         disabled: send.disabled,
         deletion_date: send.deletion_date.clone(),
+        expiration_date: send.expiration_date.clone(),
+        max_access_count: send.max_access_count,
+        access_count: send.access_count.unwrap_or(0),
+        hide_email: send.hide_email,
+        text_hidden: send.text.as_ref().map(|t| t.hidden).unwrap_or(false),
+        has_password: send.password.as_deref().is_some_and(|p| !p.is_empty()),
+        file_name,
+        file_size_name: send.file.as_ref().and_then(|f| f.size_name.clone()),
     })
 }
 
@@ -273,6 +302,36 @@ pub fn resolve_cipher_key(
     Ok(base)
 }
 
+/// Decrypt display metadata of one `login.fido2Credentials[]` entry.
+///
+/// `keyValue` (the private key) is intentionally never decrypted into the view model.
+/// Returns `None` when the relying-party id cannot be decrypted (entry is still preserved
+/// verbatim in the raw cipher for edits).
+fn decrypt_passkey(cred: &serde_json::Value, key: &SymmetricCryptoKey) -> Option<DecryptedPasskey> {
+    let field = |name: &str| -> Option<String> {
+        cred.get(name)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| decrypt_with_key(s, key).ok())
+    };
+    let rp_id = field("rpId")?;
+    let discoverable = field("discoverable")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Some(DecryptedPasskey {
+        credential_id: field("credentialId"),
+        rp_id,
+        rp_name: field("rpName"),
+        user_name: field("userName"),
+        user_display_name: field("userDisplayName"),
+        discoverable,
+        creation_date: cred
+            .get("creationDate")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
 pub fn decrypt_cipher(
     cipher: &Cipher,
     user_key: &UserKey,
@@ -289,6 +348,12 @@ pub fn decrypt_cipher(
         item.password = opt_decrypt(&login.password, &key);
         item.totp = opt_decrypt(&login.totp, &key);
         item.password_revision_date = login.password_revision_date.clone();
+        if let Some(creds) = &login.fido2_credentials {
+            item.passkeys = creds
+                .iter()
+                .filter_map(|c| decrypt_passkey(c, &key))
+                .collect();
+        }
         if let Some(uris) = &login.uris {
             for u in uris {
                 if let Some(uri) = opt_decrypt(&u.uri, &key) {
@@ -359,4 +424,63 @@ pub fn decrypt_cipher(
     }
 
     Ok(item)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vault_crypto::{encrypt_with_key, generate_user_key};
+
+    #[test]
+    fn decrypts_passkey_metadata_without_private_key() {
+        let key = generate_user_key();
+        let enc = |s: &str| serde_json::Value::String(encrypt_with_key(s, &key).unwrap());
+        let cred = serde_json::json!({
+            "credentialId": enc("cred-1"),
+            "keyType": enc("public-key"),
+            "keyValue": enc("SECRET-PRIVATE-KEY"),
+            "rpId": enc("example.com"),
+            "rpName": enc("Example"),
+            "userName": enc("alice"),
+            "discoverable": enc("true"),
+            "creationDate": "2025-01-02T03:04:05.000Z",
+        });
+        let pk = decrypt_passkey(&cred, &key).expect("passkey");
+        assert_eq!(pk.rp_id, "example.com");
+        assert_eq!(pk.rp_name.as_deref(), Some("Example"));
+        assert_eq!(pk.user_name.as_deref(), Some("alice"));
+        assert!(pk.discoverable);
+        assert_eq!(pk.label(), "example.com (alice)");
+        assert!(!format!("{pk:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn passkey_without_rp_id_is_skipped() {
+        let key = generate_user_key();
+        let cred = serde_json::json!({ "credentialId": "2.bogus" });
+        assert!(decrypt_passkey(&cred, &key).is_none());
+    }
+
+    #[test]
+    fn decrypt_cipher_collects_passkeys() {
+        let key = generate_user_key();
+        let enc = |s: &str| encrypt_with_key(s, &key).unwrap();
+        let cipher: Cipher = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "type": 1,
+            "name": enc("Site"),
+            "login": {
+                "username": enc("alice"),
+                "fido2Credentials": [{
+                    "credentialId": enc("id"),
+                    "rpId": enc("example.com"),
+                    "keyValue": enc("k"),
+                }],
+            },
+        }))
+        .unwrap();
+        let item = decrypt_cipher(&cipher, &key, &HashMap::new()).unwrap();
+        assert_eq!(item.passkeys.len(), 1);
+        assert_eq!(item.clone_warnings().len(), 1);
+    }
 }

@@ -10,26 +10,49 @@ use vault_api::{
 };
 use vault_crypto::{
     auth_hash, decrypt_bytes, decrypt_private_key, decrypt_with_key, derive_master_key,
-    encrypt_bytes, encrypt_with_key, generate_rsa_keypair, generate_user_key,
-    unwrap_user_key, wrap_user_key, KdfParams, MasterKey, SymmetricCryptoKey, UserKey,
+    encrypt_bytes, encrypt_with_key, generate_rsa_keypair, generate_user_key, unwrap_user_key,
+    wrap_user_key, KdfParams, MasterKey, SymmetricCryptoKey, UserKey,
 };
 use zeroize::Zeroize;
 
 use crate::clipboard::ClipboardService;
 use crate::decrypt::{build_index, resolve_cipher_key};
+use crate::domains::parse_domains;
 use crate::error::{Result, SessionError};
 use crate::fingerprint::fingerprint_phrase_from_public_der;
-use crate::pin::{clear_pin, pin_configured, store_pin_wrapped_key, unlock_with_pin};
-use crate::ssh_agent::{parse_ssh_key_item, start_agent_with_keys, ParsedSshKey, SshAgentHandle};
 use crate::models::*;
 use crate::paths::{app_data_dir, ensure_dir, write_atomic};
+use crate::pin::{clear_pin, pin_configured, store_pin_wrapped_key, unlock_with_pin};
+use crate::policies::{
+    clear_policies, effective_timeout_action, effective_timeout_minutes, generator_policy,
+    load_policies, master_password_policy, parse_policies, personal_vault_disabled,
+    pin_unlock_disabled, restricted_item_types, save_policies, send_policy, vault_timeout_policy,
+    GeneratorPolicy, MasterPasswordPolicy, Policy, SendPolicy, TimeoutAction, VaultTimeoutPolicy,
+};
 use crate::secure_storage::{
     delete_refresh_token_best_effort, get_refresh_token, profile_id_from_data_dir,
     set_refresh_token,
 };
-use crate::domains::parse_domains;
-use crate::policies::{generator_policy, parse_policies, send_policy, GeneratorPolicy, Policy, SendPolicy};
+use crate::send::{
+    build_send_request, format_file_size, ReceivedSend, SendOptions, SendRequestInput,
+    MAX_SEND_FILE_BYTES, SEND_TYPE_FILE, SEND_TYPE_TEXT,
+};
+use crate::ssh_agent::{parse_ssh_key_item, start_agent_with_keys, ParsedSshKey, SshAgentHandle};
 use crate::vault_cache;
+
+/// Result of [`Session::sync_if_changed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// Server revision matched; no `/sync` request was made.
+    Unchanged,
+    /// A full sync ran and the in-memory vault was rebuilt.
+    Synced,
+}
+
+/// True when the vault must be re-fetched: no stored revision, or the server's differs.
+pub(crate) fn revision_changed(stored: Option<i64>, remote: i64) -> bool {
+    stored != Some(remote)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
@@ -58,6 +81,15 @@ pub fn plaintext_token_allowed(profile_allow_plaintext: bool) -> bool {
     }
 }
 
+mod auth_flows;
+mod org;
+mod power;
+
+pub use auth_flows::{
+    pkce_pair, AuthenticatorSetupInfo, DeviceLoginStart, DeviceLoginStatus, IncomingAuthRequest,
+    SsoStart,
+};
+
 pub struct Session {
     client: VaultClient,
     email: Option<String>,
@@ -71,22 +103,31 @@ pub struct Session {
     index: VaultIndex,
     status: SessionStatus,
     last_activity: Instant,
-    /// `None` disables idle auto-lock.
+    /// Profile-requested idle timeout. `None` = never (org policy may still impose a max).
     auto_lock: Option<Duration>,
+    /// Profile-requested action when the timeout fires (org policy may override).
+    timeout_action: TimeoutAction,
     pub clipboard: ClipboardService,
     data_dir: PathBuf,
     /// True when the in-memory vault came from the encrypted offline cache.
     offline: bool,
     last_synced_at: Option<DateTime<FixedOffset>>,
+    /// Server account revision (epoch ms) observed just before the last full sync.
+    /// `None` forces the next [`Session::sync_if_changed`] to do a full sync.
+    revision_ms: Option<i64>,
     allow_plaintext_token: bool,
     /// Set when refresh token was written to disk because secure storage failed.
     pub storage_warning: Option<String>,
     insecure_http: bool,
     two_factor_device_token: Option<String>,
+    /// Advanced auth state (2FA details, device login, SSO). See `auth_flows`.
+    auth_ext: auth_flows::AuthExtSession,
     ssh_agent: Option<SshAgentHandle>,
     policies: Vec<Policy>,
     global_equivalent_domains: Vec<String>,
     equivalent_domain_groups: Vec<Vec<String>>,
+    /// Give newly created items their own random cipher key.
+    item_keys_on_create: bool,
 }
 
 impl Session {
@@ -112,18 +153,22 @@ impl Session {
             status: SessionStatus::LoggedOut,
             last_activity: Instant::now(),
             auto_lock: Some(Duration::from_secs(15 * 60)),
+            timeout_action: TimeoutAction::Lock,
             clipboard: ClipboardService::new(30),
             last_synced_at: vault_cache::synced_at(&data_dir),
-            data_dir,
             offline: false,
+            revision_ms: None,
             allow_plaintext_token: false,
             storage_warning: None,
             insecure_http: is_insecure_http(server_url),
             two_factor_device_token: None,
+            auth_ext: auth_flows::AuthExtSession::default(),
             ssh_agent: None,
-            policies: Vec::new(),
+            policies: load_policies(&data_dir),
             global_equivalent_domains: Vec::new(),
             equivalent_domain_groups: Vec::new(),
+            item_keys_on_create: true,
+            data_dir,
         })
     }
 
@@ -208,6 +253,13 @@ impl Session {
 
     fn apply_sync_metadata(&mut self, sync: &vault_api::SyncResponse) {
         self.policies = parse_policies(&sync.policies);
+        if let Err(e) = save_policies(&self.data_dir, &self.policies) {
+            tracing::warn!(error = %e, "failed to persist organization policies");
+        }
+        // Org policy type 14: drop any previously configured PIN.
+        if pin_unlock_disabled(&self.policies) && pin_configured(&self.data_dir) {
+            clear_pin(&self.data_dir);
+        }
         if let Some(domains) = &sync.domains {
             match parse_domains(domains, self.user_key.as_ref()) {
                 Ok(parsed) => {
@@ -235,6 +287,55 @@ impl Session {
 
     pub fn send_creation_allowed(&self) -> bool {
         !self.send_policy().send_disabled
+    }
+
+    /// Org vault timeout restrictions (type 9).
+    pub fn vault_timeout_policy(&self) -> VaultTimeoutPolicy {
+        vault_timeout_policy(&self.policies)
+    }
+
+    /// Org master-password requirements (type 1).
+    pub fn master_password_policy(&self) -> MasterPasswordPolicy {
+        master_password_policy(&self.policies)
+    }
+
+    /// Org policy type 14 — PIN unlock disallowed.
+    pub fn pin_unlock_blocked_by_policy(&self) -> bool {
+        pin_unlock_disabled(&self.policies)
+    }
+
+    /// Org policy type 5 — personal vault items disallowed.
+    pub fn personal_vault_blocked_by_policy(&self) -> bool {
+        personal_vault_disabled(&self.policies)
+    }
+
+    /// Org policy type 15 — Bitwarden cipher type numbers that may not be created.
+    pub fn restricted_item_type_numbers(&self) -> Vec<u8> {
+        restricted_item_types(&self.policies)
+    }
+
+    /// Whether an item of `item_type` may be created (personal vault + restricted types).
+    pub fn check_item_creation_allowed(&self, item_type: ItemType) -> Result<()> {
+        if personal_vault_disabled(&self.policies) {
+            return Err(SessionError::PolicyViolation(
+                "personal vault is disabled — items must be owned by an organization".into(),
+            ));
+        }
+        let n = match item_type {
+            ItemType::Login => 1,
+            ItemType::SecureNote => 2,
+            ItemType::Card => 3,
+            ItemType::Identity => 4,
+            ItemType::SshKey => 5,
+            ItemType::Unknown => return Ok(()),
+        };
+        if restricted_item_types(&self.policies).contains(&n) {
+            return Err(SessionError::PolicyViolation(format!(
+                "creating {} items is restricted",
+                item_type_label(item_type)
+            )));
+        }
+        Ok(())
     }
 
     pub fn uri_equivalent_groups(&self) -> Vec<Vec<String>> {
@@ -284,9 +385,46 @@ impl Session {
         }
     }
 
-    /// Set idle auto-lock timeout in minutes. `None` disables auto-lock.
+    /// Set the profile's idle auto-lock timeout in minutes. `None` = never.
+    /// The effective value is still capped by org policy type 9.
     pub fn set_auto_lock(&mut self, minutes: Option<u64>) {
         self.auto_lock = minutes.map(|m| Duration::from_secs(m.saturating_mul(60)));
+    }
+
+    /// Set the profile's preferred timeout action (org policy may override).
+    pub fn set_timeout_action(&mut self, action: TimeoutAction) {
+        self.timeout_action = action;
+    }
+
+    /// Idle timeout in minutes after applying the org maximum (`None` = never).
+    pub fn effective_auto_lock_minutes(&self) -> Option<u64> {
+        let profile = self.auto_lock.map(|d| (d.as_secs() / 60).max(1));
+        effective_timeout_minutes(profile, &self.vault_timeout_policy())
+    }
+
+    /// Timeout action after applying org policy.
+    pub fn effective_timeout_action(&self) -> TimeoutAction {
+        effective_timeout_action(self.timeout_action, &self.vault_timeout_policy())
+    }
+
+    fn effective_auto_lock(&self) -> Option<Duration> {
+        let policy = self.vault_timeout_policy();
+        match (self.auto_lock, policy.max_minutes) {
+            (Some(d), Some(m)) => Some(d.min(Duration::from_secs(m.saturating_mul(60)))),
+            (None, Some(m)) => Some(Duration::from_secs(m.saturating_mul(60))),
+            (d, None) => d,
+        }
+    }
+
+    /// Apply the effective timeout action now (idle expiry, system lock / sleep).
+    /// Returns the action performed.
+    pub fn apply_timeout_action(&mut self) -> TimeoutAction {
+        let action = self.effective_timeout_action();
+        match action {
+            TimeoutAction::Lock => self.lock(),
+            TimeoutAction::Logout => self.logout(),
+        }
+        action
     }
 
     pub fn touch(&mut self) {
@@ -297,17 +435,18 @@ impl Session {
         if self.status != SessionStatus::Unlocked {
             return None;
         }
-        let timeout = self.auto_lock?;
+        let timeout = self.effective_auto_lock()?;
         Some(timeout.saturating_sub(self.last_activity.elapsed()))
     }
 
-    pub fn tick(&mut self) {
+    /// Periodic maintenance. Returns the timeout action if the idle timeout just fired.
+    pub fn tick(&mut self) -> Option<TimeoutAction> {
         self.clipboard.tick();
-        if let Some(timeout) = self.auto_lock {
-            if self.status == SessionStatus::Unlocked && self.last_activity.elapsed() >= timeout {
-                self.lock();
-            }
+        let timeout = self.effective_auto_lock()?;
+        if self.status == SessionStatus::Unlocked && self.last_activity.elapsed() >= timeout {
+            return Some(self.apply_timeout_action());
         }
+        None
     }
 
     pub fn lock(&mut self) {
@@ -318,6 +457,7 @@ impl Session {
             let _ = mk; // ZeroizeOnDrop
         }
         self.master_key = None;
+        self.revision_ms = None;
         self.index = VaultIndex::default();
         if self.status == SessionStatus::Unlocked {
             self.status = SessionStatus::Locked;
@@ -395,6 +535,8 @@ impl Session {
             .await
         {
             Ok(token) => {
+                self.client.set_new_device_otp(None);
+                self.auth_ext.two_factor_raw = None;
                 if let Some(dt) = token.two_factor_token.filter(|t| !t.is_empty()) {
                     self.two_factor_device_token = Some(dt);
                 }
@@ -415,7 +557,8 @@ impl Session {
                 self.sync().await?;
                 Ok(LoginResult::Success)
             }
-            Err(vault_api::ApiError::TwoFactorRequired { providers, .. }) => {
+            Err(vault_api::ApiError::TwoFactorRequired { providers, raw }) => {
+                self.auth_ext.two_factor_raw = Some(raw);
                 self.email = Some(email.to_string());
                 // Do not retain master_key while still LoggedOut — login_2fa re-derives.
                 drop(master);
@@ -459,8 +602,8 @@ impl Session {
     /// Clone a personal login into a new cipher (name suffixed with " (copy)").
     pub async fn clone_login(&mut self, id: &str) -> Result<String> {
         self.ensure_online()?;
+        self.check_item_creation_allowed(ItemType::Login)?;
         let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
-        self.ensure_personal_editable(&item)?;
         if item.item_type != ItemType::Login {
             return Err(SessionError::Other(
                 "only login items can be cloned currently".into(),
@@ -491,6 +634,18 @@ impl Session {
         self.client.update_cipher_partial(id, &partial).await?;
         self.sync().await?;
         Ok(())
+    }
+
+    /// Share a personal item with an organization (`bw share`). See
+    /// [`Session::share_item_to_org`] (kept as the CLI-facing name).
+    pub async fn share_item(
+        &mut self,
+        id: &str,
+        organization_id: &str,
+        collection_ids: &[String],
+    ) -> Result<()> {
+        self.share_item_to_org(id, organization_id, collection_ids)
+            .await
     }
 
     /// OAuth2 client-credentials login (Bitwarden API key). Master password still required to decrypt vault keys.
@@ -614,7 +769,33 @@ impl Session {
         Ok(())
     }
 
+    /// Cheap change check: `GET /accounts/revision-date` and compare with the revision seen at
+    /// the last full sync. Only fetches `/sync` when the server reports a newer revision (or when
+    /// offline / never synced / the probe itself fails).
+    ///
+    /// Does not call [`Session::touch`] when nothing changed, so background polling never resets
+    /// the idle auto-lock timer.
+    pub async fn sync_if_changed(&mut self) -> Result<SyncOutcome> {
+        if self.offline || self.revision_ms.is_none() || self.status != SessionStatus::Unlocked {
+            self.sync().await?;
+            return Ok(SyncOutcome::Synced);
+        }
+        match self.client.get_revision_date().await {
+            Ok(remote) if !revision_changed(self.revision_ms, remote) => Ok(SyncOutcome::Unchanged),
+            // Changed, or probe failed (expired token, transport, …): full sync handles
+            // token refresh and offline fallback consistently.
+            _ => {
+                self.sync().await?;
+                Ok(SyncOutcome::Synced)
+            }
+        }
+    }
+
     pub async fn sync(&mut self) -> Result<()> {
+        // Record the revision *before* fetching so a concurrent server change is never missed
+        // (worst case: one redundant full sync next poll). Best-effort — failure just disables
+        // the shortcut until the next successful sync.
+        let revision_before = self.client.get_revision_date().await.ok();
         // Sync is allowed while offline — success clears the offline flag.
         let sync = match self.client.sync().await {
             Ok(s) => s,
@@ -644,6 +825,7 @@ impl Session {
         }
         self.apply_sync_metadata(&sync);
         self.write_cache(&sync);
+        self.revision_ms = revision_before;
         self.offline = false;
         let _ = self.persist_auth();
         self.touch();
@@ -670,11 +852,35 @@ impl Session {
         &self.index.sends
     }
 
+    /// Validate `password` against org master-password requirements (type 1).
+    pub fn check_master_password_policy(&self, password: &str) -> Result<()> {
+        let policy = self.master_password_policy();
+        if !policy.is_active() {
+            return Ok(());
+        }
+        let email = self.email.as_deref().unwrap_or("");
+        let inputs: Vec<&str> = email.split('@').filter(|s| !s.is_empty()).collect();
+        let problems = policy.validate(password, &inputs);
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(SessionError::PolicyViolation(format!(
+                "master password {}",
+                problems.join("; ")
+            )))
+        }
+    }
+
     pub fn pin_unlock_available(&self) -> bool {
-        pin_configured(&self.data_dir)
+        !pin_unlock_disabled(&self.policies) && pin_configured(&self.data_dir)
     }
 
     pub fn configure_pin(&self, pin: &str) -> Result<()> {
+        if pin_unlock_disabled(&self.policies) {
+            return Err(SessionError::PolicyViolation(
+                "PIN unlock is disabled".into(),
+            ));
+        }
         let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
         let email = self.email.as_ref().ok_or(SessionError::NotLoggedIn)?;
         store_pin_wrapped_key(&self.data_dir, email, pin, user_key)
@@ -733,6 +939,7 @@ impl Session {
             ));
         }
         let email = self.email.clone().ok_or(SessionError::NotLoggedIn)?;
+        self.check_master_password_policy(new_password)?;
         let kdf = self
             .kdf
             .clone()
@@ -777,6 +984,12 @@ impl Session {
     }
 
     pub async fn unlock_with_pin_code(&mut self, pin: &str) -> Result<()> {
+        if pin_unlock_disabled(&self.policies) {
+            clear_pin(&self.data_dir);
+            return Err(SessionError::PolicyViolation(
+                "PIN unlock is disabled — use your master password".into(),
+            ));
+        }
         let email = self.email.clone().ok_or(SessionError::NotLoggedIn)?;
         let user_key = unlock_with_pin(&self.data_dir, &email, pin)?;
         self.user_key = Some(user_key);
@@ -892,11 +1105,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn delete_attachment(
-        &mut self,
-        cipher_id: &str,
-        attachment_id: &str,
-    ) -> Result<()> {
+    pub async fn delete_attachment(&mut self, cipher_id: &str, attachment_id: &str) -> Result<()> {
         self.ensure_online()?;
         self.client
             .delete_attachment(cipher_id, attachment_id)
@@ -923,51 +1132,192 @@ impl Session {
         let enc_key = encrypt_bytes(att_key.to_bytes().as_ref(), &cipher_key)?;
         let enc_name = encrypt_with_key(file_name, &cipher_key)?;
         self.client
-            .upload_cipher_attachment_v2(
-                cipher_id,
-                &enc_key,
-                &enc_name,
-                enc_file.into_bytes(),
-            )
+            .upload_cipher_attachment_v2(cipher_id, &enc_key, &enc_name, enc_file.into_bytes())
             .await?;
         self.sync().await?;
         Ok(())
     }
 
+    /// Create a text Send with default options (7-day deletion, no password).
     pub async fn create_text_send(&mut self, name: &str, text: &str) -> Result<String> {
-        self.ensure_online()?;
+        self.create_send(name, text, &SendOptions::default()).await
+    }
+
+    fn check_send_creation(&self, opts: &SendOptions) -> Result<()> {
         if !self.send_creation_allowed() {
             return Err(SessionError::Other(
                 "organization policy disables Bitwarden Send".into(),
             ));
         }
+        if opts.hide_email && self.send_policy().disable_hide_email == Some(true) {
+            return Err(SessionError::Other(
+                "organization policy disallows hiding your email on Sends".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Create a text Send with full options (password, max access count, dates, …).
+    pub async fn create_send(
+        &mut self,
+        name: &str,
+        text: &str,
+        opts: &SendOptions,
+    ) -> Result<String> {
+        self.ensure_online()?;
+        self.check_send_creation(opts)?;
+        if text.is_empty() {
+            return Err(SessionError::Other("send text is required".into()));
+        }
         let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
         let key = crate::send_crypto::generate_send_key_material();
         let wrapped_key = encrypt_bytes(key.as_slice(), user_key)?;
-        let req = vault_api::SendRequest {
-            send_type: 0,
-            name: crate::send_crypto::encrypt_send_meta(&key, name)?,
-            notes: None,
-            key: Some(wrapped_key),
-            password: None,
-            max_access_count: None,
-            expiration_date: None,
-            disabled: false,
-            hide_email: false,
-            text: Some(vault_api::SendText {
-                text: Some(crate::send_crypto::encrypt_send_text(&key, text)?),
-                hidden: false,
-            }),
+        let req = build_send_request(SendRequestInput {
+            send_type: SEND_TYPE_TEXT,
+            key: &key,
+            wrapped_key,
+            name,
+            opts,
+            text: Some(text),
             file: None,
-            deletion_date: None,
-        };
+            file_length: None,
+            existing_deletion: None,
+            now: chrono::Utc::now(),
+        })?;
         let created = self.client.create_send(&req).await?;
         self.sync().await?;
         Ok(created.id.unwrap_or_default())
     }
 
-    pub async fn update_text_send(&mut self, id: &str, name: &str, text: &str) -> Result<()> {
+    /// Create a file Send: encrypts the file locally and uploads it.
+    pub async fn create_file_send(
+        &mut self,
+        name: &str,
+        path: &Path,
+        opts: &SendOptions,
+    ) -> Result<String> {
         self.ensure_online()?;
+        self.check_send_creation(opts)?;
+        let meta = std::fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(SessionError::Other(format!(
+                "{} is not a file",
+                path.display()
+            )));
+        }
+        if meta.len() == 0 {
+            return Err(SessionError::Other("cannot send an empty file".into()));
+        }
+        if meta.len() > MAX_SEND_FILE_BYTES {
+            return Err(SessionError::Other(format!(
+                "file too large for Send (max {})",
+                format_file_size(MAX_SEND_FILE_BYTES)
+            )));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| SessionError::Other("invalid file path".into()))?
+            .to_string();
+        let plain = std::fs::read(path)?;
+
+        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
+        let key = crate::send_crypto::generate_send_key_material();
+        let wrapped_key = encrypt_bytes(key.as_slice(), user_key)?;
+        let enc_file = crate::send_crypto::encrypt_send_file_bytes(&key, &plain)?;
+        let enc_len = enc_file.len() as u64;
+        let enc_file_name = crate::send_crypto::encrypt_send_meta(&key, &file_name)?;
+        let req = build_send_request(SendRequestInput {
+            send_type: SEND_TYPE_FILE,
+            key: &key,
+            wrapped_key,
+            name,
+            opts,
+            text: None,
+            file: Some(vault_api::SendFile {
+                id: None,
+                file_name: Some(enc_file_name.clone()),
+                size: Some(enc_len),
+                size_name: Some(format_file_size(enc_len)),
+                validated: false,
+            }),
+            file_length: Some(enc_len),
+            existing_deletion: None,
+            now: chrono::Utc::now(),
+        })?;
+
+        let created = self.client.create_file_send(&req).await?;
+        let send_id = created.send_response.id.clone().unwrap_or_default();
+        let file_id = created
+            .send_response
+            .file
+            .as_ref()
+            .and_then(|f| f.id.clone())
+            .unwrap_or_default();
+        let upload = if created.file_upload_type == vault_api::SEND_FILE_UPLOAD_AZURE {
+            self.client
+                .upload_send_file_azure(&created.url, enc_file)
+                .await
+        } else {
+            self.client
+                .upload_send_file_direct(&send_id, &file_id, &enc_file_name, enc_file)
+                .await
+        };
+        if let Err(e) = upload {
+            // Don't leave a dangling, un-downloadable Send behind.
+            let _ = self.client.delete_send(&send_id).await;
+            return Err(e.into());
+        }
+        self.sync().await?;
+        Ok(send_id)
+    }
+
+    /// Options currently stored for a Send (notes decrypted) — used to pre-fill edit forms.
+    pub fn send_options(&self, id: &str) -> Result<SendOptions> {
+        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
+        let raw = self.index.raw_sends.get(id).ok_or(SessionError::NotFound)?;
+        let notes = match (raw.key.as_deref(), raw.notes.as_deref()) {
+            (Some(k), Some(n)) => {
+                let km = crate::decrypt::unwrap_send_key_material(k, user_key)?;
+                crate::send_crypto::decrypt_send_meta_field(&km, n).ok()
+            }
+            _ => None,
+        };
+        Ok(SendOptions {
+            notes,
+            password: None,
+            remove_password: false,
+            max_access_count: raw.max_access_count,
+            expiration_date: raw.expiration_date.clone(),
+            deletion_date: raw.deletion_date.clone(),
+            hide_email: raw.hide_email,
+            disabled: raw.disabled,
+            hidden_text: raw.text.as_ref().map(|t| t.hidden).unwrap_or(false),
+        })
+    }
+
+    /// Update a text Send's name/body, keeping its other options.
+    pub async fn update_text_send(&mut self, id: &str, name: &str, text: &str) -> Result<()> {
+        let opts = self.send_options(id)?;
+        self.update_send(id, name, Some(text), &opts).await
+    }
+
+    /// Update any Send. `text` applies to text Sends (`None` keeps the body); file Sends keep
+    /// their file. `opts.password = None` leaves the password untouched unless
+    /// `opts.remove_password` is set.
+    pub async fn update_send(
+        &mut self,
+        id: &str,
+        name: &str,
+        text: Option<&str>,
+        opts: &SendOptions,
+    ) -> Result<()> {
+        self.ensure_online()?;
+        if opts.hide_email && self.send_policy().disable_hide_email == Some(true) {
+            return Err(SessionError::Other(
+                "organization policy disallows hiding your email on Sends".into(),
+            ));
+        }
         let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?.clone();
         let raw = self
             .index
@@ -980,26 +1330,33 @@ impl Session {
             .as_deref()
             .ok_or_else(|| SessionError::Other("send has no key material".into()))?;
         let key_material = crate::decrypt::unwrap_send_key_material(key_enc, &user_key)?;
-        let req = vault_api::SendRequest {
+        let is_text = raw.send_type == SEND_TYPE_TEXT;
+        let mut req = build_send_request(SendRequestInput {
             send_type: raw.send_type,
-            name: crate::send_crypto::encrypt_send_meta(&key_material, name)?,
-            notes: raw.notes.clone(),
-            key: Some(key_enc.to_string()),
-            password: raw.password.clone(),
-            max_access_count: raw.max_access_count,
-            expiration_date: raw.expiration_date.clone(),
-            disabled: raw.disabled,
-            hide_email: raw.hide_email,
-            text: Some(vault_api::SendText {
-                text: Some(crate::send_crypto::encrypt_send_text(&key_material, text)?),
-                hidden: raw.text.as_ref().map(|t| t.hidden).unwrap_or(false),
-            }),
-            file: raw.file.clone(),
-            deletion_date: raw.deletion_date.clone(),
-        };
+            key: &key_material,
+            wrapped_key: key_enc.to_string(),
+            name,
+            opts,
+            text: if is_text { text } else { None },
+            file: if is_text { None } else { raw.file.clone() },
+            file_length: None,
+            existing_deletion: raw.deletion_date.as_deref(),
+            now: chrono::Utc::now(),
+        })?;
+        if is_text && text.is_none() {
+            req.text = raw.text.clone();
+        }
         self.client.update_send(id, &req).await?;
+        if opts.remove_password && opts.password.as_deref().is_none_or(str::is_empty) {
+            self.client.remove_send_password(id).await?;
+        }
         self.sync().await?;
         Ok(())
+    }
+
+    /// Receive a Send from a share link (does not require a session).
+    pub async fn receive_send(url: &str, password: Option<&str>) -> Result<ReceivedSend> {
+        crate::send::receive_send(url, password).await
     }
 
     pub async fn delete_send(&mut self, id: &str) -> Result<()> {
@@ -1033,14 +1390,15 @@ impl Session {
         Ok(format!("{base}/#/send/{access_id}/{url_key}"))
     }
 
-    /// True when ciphertext can be re-encrypted (personal, org, or item-key ciphers).
+    /// True when the item can be re-encrypted *and* the user has write permission
+    /// (see [`Session::can_edit_item`]).
     pub fn item_editable(&self, id: &str) -> bool {
-        self.resolve_item_cipher_key(id).is_ok()
+        self.can_edit_item(id)
     }
 
     pub async fn clone_item(&mut self, id: &str) -> Result<String> {
         let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
-        self.ensure_personal_editable(&item)?;
+        self.check_item_creation_allowed(item.item_type)?;
         match item.item_type {
             ItemType::Login => self.clone_login(id).await,
             ItemType::SecureNote => {
@@ -1125,13 +1483,6 @@ impl Session {
             .ok_or_else(|| SessionError::Other("missing KDF parameters".into()))?;
         let derived = derive_master_key(password, email, &kdf)?;
         Ok(constant_time_eq(master.as_bytes(), derived.as_bytes()))
-    }
-
-    fn ensure_personal_editable(&self, item: &DecryptedItem) -> Result<()> {
-        if item.organization_id.is_some() || item.has_item_key {
-            return Err(SessionError::OrgEditUnsupported);
-        }
-        Ok(())
     }
 
     fn resolve_item_cipher_key(&self, id: &str) -> Result<SymmetricCryptoKey> {
@@ -1219,14 +1570,7 @@ impl Session {
     }
 
     pub async fn create_login(&mut self, draft: &LoginDraft) -> Result<String> {
-        self.ensure_online()?;
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
-        let user_id = self.user_id()?;
-        let req = encrypt_login(draft, user_key, user_id)?;
-        let created = self.client.create_cipher(&req).await?;
-        let id = created.id.clone().unwrap_or_default();
-        self.sync().await?;
-        Ok(id)
+        self.create_login_in(draft, None).await
     }
 
     pub async fn update_login(&mut self, id: &str, draft: &LoginDraft) -> Result<()> {
@@ -1276,27 +1620,79 @@ impl Session {
         Ok(())
     }
 
-    pub async fn create_note(&mut self, draft: &NoteDraft) -> Result<String> {
+    /// Replace custom fields on a cipher (encrypts name/value with the item key).
+    pub async fn update_custom_fields(
+        &mut self,
+        id: &str,
+        fields: &[DecryptedField],
+    ) -> Result<()> {
         self.ensure_online()?;
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
+        let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
+        self.ensure_item_editable(&item)?;
+        let cipher_key = self.resolve_item_cipher_key(id)?;
         let user_id = self.user_id()?;
-        let req = encrypt_note(draft, user_key, user_id)?;
-        let created = self.client.create_cipher(&req).await?;
-        let id = created.id.clone().unwrap_or_default();
+        let raw = self
+            .index
+            .raw_ciphers
+            .get(id)
+            .cloned()
+            .ok_or(SessionError::NotFound)?;
+
+        // Rebuild a CipherRequest from the existing raw cipher, swapping only fields.
+        let mut req = CipherRequest {
+            cipher_type: raw.cipher_type,
+            name: raw.name.clone(),
+            notes: raw.notes.clone(),
+            folder_id: raw.folder_id.clone(),
+            favorite: raw.favorite,
+            reprompt: raw.reprompt,
+            login: raw.login.clone(),
+            secure_note: raw.secure_note.clone(),
+            card: raw.card.clone(),
+            identity: raw.identity.clone(),
+            fields: None,
+            password_history: raw.password_history.clone(),
+            attachments: raw.attachments.clone(),
+            attachments2: None,
+            organization_id: raw.organization_id.clone(),
+            collection_ids: raw.collection_ids.clone(),
+            key: raw.key.clone(),
+            ssh_key: raw.ssh_key.clone(),
+            last_known_revision_date: item.revision_date.clone(),
+            encrypted_for: Self::cipher_encrypted_for(&raw, user_id),
+        };
+        // Name/notes on raw are already encrypted; keep them.
+        let enc_fields: Result<Vec<_>> = fields
+            .iter()
+            .map(|f| {
+                Ok(vault_api::CipherField {
+                    field_type: f.field_type.as_u8(),
+                    name: Some(encrypt_with_key(&f.name, &cipher_key)?),
+                    value: Some(encrypt_with_key(&f.value, &cipher_key)?),
+                    linked_id: f.linked_id,
+                })
+            })
+            .collect();
+        req.fields = Some(enc_fields?);
+        self.client.update_cipher(id, &req).await?;
         self.sync().await?;
-        Ok(id)
+        Ok(())
+    }
+
+    pub async fn create_note(&mut self, draft: &NoteDraft) -> Result<String> {
+        self.create_note_in(draft, None).await
     }
 
     pub async fn update_note(&mut self, id: &str, draft: &NoteDraft) -> Result<()> {
         self.ensure_online()?;
         let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
-        self.ensure_personal_editable(&item)?;
+        self.ensure_item_editable(&item)?;
         if item.item_type != ItemType::SecureNote {
             return Err(SessionError::Other("item is not a secure note".into()));
         }
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
+        let cipher_key = self.resolve_item_cipher_key(id)?;
         let user_id = self.user_id()?;
-        let mut req = encrypt_note(draft, user_key, user_id)?;
+        let mut req = encrypt_note(draft, &cipher_key, user_id)?;
         req.last_known_revision_date = item.revision_date.clone();
         if let Some(raw) = self.index.raw_ciphers.get(id) {
             preserve_cipher_metadata(&mut req, raw);
@@ -1312,26 +1708,19 @@ impl Session {
     }
 
     pub async fn create_card(&mut self, draft: &CardDraft) -> Result<String> {
-        self.ensure_online()?;
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
-        let user_id = self.user_id()?;
-        let req = encrypt_card(draft, user_key, user_id)?;
-        let created = self.client.create_cipher(&req).await?;
-        let id = created.id.clone().unwrap_or_default();
-        self.sync().await?;
-        Ok(id)
+        self.create_card_in(draft, None).await
     }
 
     pub async fn update_card(&mut self, id: &str, draft: &CardDraft) -> Result<()> {
         self.ensure_online()?;
         let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
-        self.ensure_personal_editable(&item)?;
+        self.ensure_item_editable(&item)?;
         if item.item_type != ItemType::Card {
             return Err(SessionError::Other("item is not a card".into()));
         }
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
+        let cipher_key = self.resolve_item_cipher_key(id)?;
         let user_id = self.user_id()?;
-        let mut req = encrypt_card(draft, user_key, user_id)?;
+        let mut req = encrypt_card(draft, &cipher_key, user_id)?;
         req.last_known_revision_date = item.revision_date.clone();
         if let Some(raw) = self.index.raw_ciphers.get(id) {
             preserve_cipher_metadata(&mut req, raw);
@@ -1342,26 +1731,19 @@ impl Session {
     }
 
     pub async fn create_identity(&mut self, draft: &IdentityDraft) -> Result<String> {
-        self.ensure_online()?;
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
-        let user_id = self.user_id()?;
-        let req = encrypt_identity(draft, user_key, user_id)?;
-        let created = self.client.create_cipher(&req).await?;
-        let id = created.id.clone().unwrap_or_default();
-        self.sync().await?;
-        Ok(id)
+        self.create_identity_in(draft, None).await
     }
 
     pub async fn update_identity(&mut self, id: &str, draft: &IdentityDraft) -> Result<()> {
         self.ensure_online()?;
         let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
-        self.ensure_personal_editable(&item)?;
+        self.ensure_item_editable(&item)?;
         if item.item_type != ItemType::Identity {
             return Err(SessionError::Other("item is not an identity".into()));
         }
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
+        let cipher_key = self.resolve_item_cipher_key(id)?;
         let user_id = self.user_id()?;
-        let mut req = encrypt_identity(draft, user_key, user_id)?;
+        let mut req = encrypt_identity(draft, &cipher_key, user_id)?;
         req.last_known_revision_date = item.revision_date.clone();
         if let Some(raw) = self.index.raw_ciphers.get(id) {
             preserve_cipher_metadata(&mut req, raw);
@@ -1372,26 +1754,19 @@ impl Session {
     }
 
     pub async fn create_ssh_key(&mut self, draft: &SshKeyDraft) -> Result<String> {
-        self.ensure_online()?;
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
-        let user_id = self.user_id()?;
-        let req = encrypt_ssh_key(draft, user_key, user_id)?;
-        let created = self.client.create_cipher(&req).await?;
-        let id = created.id.clone().unwrap_or_default();
-        self.sync().await?;
-        Ok(id)
+        self.create_ssh_key_in(draft, None).await
     }
 
     pub async fn update_ssh_key(&mut self, id: &str, draft: &SshKeyDraft) -> Result<()> {
         self.ensure_online()?;
         let item = self.get_item(id).ok_or(SessionError::NotFound)?.clone();
-        self.ensure_personal_editable(&item)?;
+        self.ensure_item_editable(&item)?;
         if item.item_type != ItemType::SshKey {
             return Err(SessionError::Other("item is not an SSH key".into()));
         }
-        let user_key = self.user_key.as_ref().ok_or(SessionError::Locked)?;
+        let cipher_key = self.resolve_item_cipher_key(id)?;
         let user_id = self.user_id()?;
-        let mut req = encrypt_ssh_key(draft, user_key, user_id)?;
+        let mut req = encrypt_ssh_key(draft, &cipher_key, user_id)?;
         req.last_known_revision_date = item.revision_date.clone();
         if let Some(raw) = self.index.raw_ciphers.get(id) {
             preserve_cipher_metadata(&mut req, raw);
@@ -1542,6 +1917,7 @@ impl Session {
         }
         let path = data_dir.join("auth.json");
         let _ = std::fs::remove_file(path);
+        clear_policies(data_dir);
         vault_cache::clear(data_dir);
     }
 
@@ -1652,18 +2028,22 @@ impl Session {
             status: SessionStatus::Locked,
             last_activity: Instant::now(),
             auto_lock: Some(Duration::from_secs(15 * 60)),
+            timeout_action: TimeoutAction::Lock,
             clipboard: ClipboardService::new(30),
             last_synced_at,
-            data_dir,
             offline: false,
+            revision_ms: None,
             allow_plaintext_token,
             storage_warning: None,
             insecure_http: is_insecure_http(&server_url),
             two_factor_device_token: auth.two_factor_device_token.clone(),
+            auth_ext: auth_flows::AuthExtSession::default(),
             ssh_agent: None,
-            policies: Vec::new(),
+            policies: load_policies(&data_dir),
             global_equivalent_domains: Vec::new(),
             equivalent_domain_groups: Vec::new(),
+            item_keys_on_create: true,
+            data_dir,
         };
         if refresh_ok {
             // Re-persist in case the server rotated the refresh token (and upgrade disk → keyring).
@@ -1695,6 +2075,17 @@ impl LoginDraft {
         if let Some(t) = &mut self.totp {
             t.zeroize();
         }
+    }
+}
+
+fn item_type_label(t: ItemType) -> &'static str {
+    match t {
+        ItemType::Login => "login",
+        ItemType::SecureNote => "secure note",
+        ItemType::Card => "card",
+        ItemType::Identity => "identity",
+        ItemType::SshKey => "SSH key",
+        ItemType::Unknown => "unknown",
     }
 }
 
@@ -1773,6 +2164,7 @@ fn encrypt_login(
         fields: None,
         password_history: None,
         attachments: None,
+        attachments2: None,
         organization_id: None,
         collection_ids: None,
         key: None,
@@ -1797,6 +2189,7 @@ fn encrypt_note(draft: &NoteDraft, key: &UserKey, user_id: &str) -> Result<Ciphe
         fields: None,
         password_history: None,
         attachments: None,
+        attachments2: None,
         organization_id: None,
         collection_ids: None,
         key: None,
@@ -1828,6 +2221,7 @@ fn encrypt_card(draft: &CardDraft, key: &UserKey, user_id: &str) -> Result<Ciphe
         fields: None,
         password_history: None,
         attachments: None,
+        attachments2: None,
         organization_id: None,
         collection_ids: None,
         key: None,
@@ -1871,6 +2265,7 @@ fn encrypt_identity(draft: &IdentityDraft, key: &UserKey, user_id: &str) -> Resu
         fields: None,
         password_history: None,
         attachments: None,
+        attachments2: None,
         organization_id: None,
         collection_ids: None,
         key: None,
@@ -1895,6 +2290,7 @@ fn encrypt_ssh_key(draft: &SshKeyDraft, key: &UserKey, user_id: &str) -> Result<
         fields: None,
         password_history: None,
         attachments: None,
+        attachments2: None,
         organization_id: None,
         collection_ids: None,
         key: None,
@@ -1998,6 +2394,13 @@ pub fn totp_display_from_secret(secret_or_uri: &str) -> Result<TotpDisplay> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revision_change_detection() {
+        assert!(revision_changed(None, 5));
+        assert!(!revision_changed(Some(5), 5));
+        assert!(revision_changed(Some(5), 6));
+    }
+
     use std::sync::Arc;
 
     use super::*;
@@ -2454,5 +2857,106 @@ mod tests {
                 assert!(!dir.join("auth.json").exists());
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod policy_enforcement_tests {
+    use super::*;
+    use crate::policies::parse_policies;
+    use serde_json::json;
+
+    fn session_with(policies: Vec<serde_json::Value>) -> (tempfile::TempDir, Session) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = Session::with_data_dir("http://127.0.0.1:8080", tmp.path().join("p")).unwrap();
+        s.policies = parse_policies(&policies);
+        (tmp, s)
+    }
+
+    fn pol(ty: u8, data: serde_json::Value) -> serde_json::Value {
+        json!({ "id": format!("p{ty}"), "organizationId": "o", "type": ty, "enabled": true, "data": data })
+    }
+
+    #[test]
+    fn vault_timeout_policy_caps_profile_timeout() {
+        let (_t, mut s) = session_with(vec![pol(9, json!({ "minutes": 10, "action": "logOut" }))]);
+        s.set_auto_lock(Some(60));
+        assert_eq!(s.effective_auto_lock_minutes(), Some(10));
+        s.set_auto_lock(None);
+        assert_eq!(s.effective_auto_lock_minutes(), Some(10));
+        s.set_auto_lock(Some(5));
+        assert_eq!(s.effective_auto_lock_minutes(), Some(5));
+        s.set_timeout_action(TimeoutAction::Lock);
+        assert_eq!(s.effective_timeout_action(), TimeoutAction::Logout);
+    }
+
+    #[test]
+    fn no_policy_keeps_profile_timeout_and_action() {
+        let (_t, mut s) = session_with(vec![]);
+        s.set_auto_lock(None);
+        assert_eq!(s.effective_auto_lock_minutes(), None);
+        s.set_timeout_action(TimeoutAction::Logout);
+        assert_eq!(s.effective_timeout_action(), TimeoutAction::Logout);
+    }
+
+    #[test]
+    fn timeout_action_logout_logs_out() {
+        let (_t, mut s) = session_with(vec![]);
+        s.status = SessionStatus::Unlocked;
+        s.set_timeout_action(TimeoutAction::Logout);
+        assert_eq!(s.apply_timeout_action(), TimeoutAction::Logout);
+        assert_eq!(s.status(), SessionStatus::LoggedOut);
+
+        s.status = SessionStatus::Unlocked;
+        s.set_timeout_action(TimeoutAction::Lock);
+        assert_eq!(s.apply_timeout_action(), TimeoutAction::Lock);
+        assert_eq!(s.status(), SessionStatus::Locked);
+    }
+
+    #[test]
+    fn pin_policy_blocks_pin() {
+        let (_t, s) = session_with(vec![pol(14, json!({}))]);
+        assert!(!s.pin_unlock_available());
+        assert!(matches!(
+            s.configure_pin("1234"),
+            Err(SessionError::PolicyViolation(_))
+        ));
+    }
+
+    #[test]
+    fn item_creation_policies() {
+        let (_t, s) = session_with(vec![pol(15, json!([3]))]);
+        assert!(s.check_item_creation_allowed(ItemType::Login).is_ok());
+        assert!(matches!(
+            s.check_item_creation_allowed(ItemType::Card),
+            Err(SessionError::PolicyViolation(_))
+        ));
+        let (_t, s) = session_with(vec![pol(5, json!({}))]);
+        assert!(s.check_item_creation_allowed(ItemType::Login).is_err());
+    }
+
+    #[test]
+    fn master_password_policy_check() {
+        let (_t, s) = session_with(vec![pol(
+            1,
+            json!({ "minLength": 14, "requireNumbers": true }),
+        )]);
+        assert!(s.check_master_password_policy("short").is_err());
+        assert!(s
+            .check_master_password_policy("a-long-enough-pass-9")
+            .is_ok());
+    }
+
+    #[test]
+    fn policies_load_from_disk_on_new_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("p");
+        {
+            let mut s = Session::with_data_dir("http://127.0.0.1:8080", dir.clone()).unwrap();
+            s.policies = parse_policies(&[pol(14, json!({}))]);
+            save_policies(&dir, &s.policies).unwrap();
+        }
+        let s = Session::with_data_dir("http://127.0.0.1:8080", dir).unwrap();
+        assert!(s.pin_unlock_blocked_by_policy());
     }
 }

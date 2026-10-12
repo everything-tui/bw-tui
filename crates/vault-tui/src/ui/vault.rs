@@ -133,7 +133,13 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
             .iter()
             .map(|&i| {
                 let s = &app.sends[i];
-                ListItem::new(format!("{}  {}", if s.disabled { "○" } else { "●" }, s.name))
+                ListItem::new(format!(
+                    "{}  {} {}{}",
+                    if s.disabled { "○" } else { "●" },
+                    if s.is_file { "▤" } else { "≡" },
+                    s.name,
+                    if s.has_password { " (pw)" } else { "" }
+                ))
             })
             .collect();
         let mut state = ListState::default().with_selected(Some(app.selected_item));
@@ -217,6 +223,11 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
                 .and_then(|id| app.org_labels.get(id))
                 .map(|n| format!(" [{n}]"))
                 .unwrap_or_default();
+            let mark = if app.selected_ids.contains(&item.id) {
+                "◉ "
+            } else {
+                ""
+            };
             let mut cells = vec![
                 Cell::from(Span::styled(
                     "●",
@@ -227,7 +238,7 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(FAV),
                 )),
                 Cell::from(Span::styled(
-                    truncate(&format!("{}{org_badge}", item.name), name_w),
+                    truncate(&format!("{mark}{}{org_badge}", item.name), name_w),
                     Style::default().fg(FG),
                 )),
             ];
@@ -303,12 +314,73 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             return;
         };
         let send = &app.sends[idx];
-        let text = send.text.as_deref().unwrap_or("(empty)");
+        let mut lines: Vec<Line> = vec![
+            Line::from(Span::styled(
+                send.name.clone(),
+                Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                if send.is_file {
+                    "File Send"
+                } else {
+                    "Text Send"
+                },
+                Style::default().fg(MUTED),
+            )),
+            Line::from(""),
+        ];
+        if send.is_file {
+            lines.push(Line::from(format!(
+                "File: {}{}",
+                send.file_name.as_deref().unwrap_or("-"),
+                send.file_size_name
+                    .as_deref()
+                    .map(|s| format!(" ({s})"))
+                    .unwrap_or_default()
+            )));
+        } else {
+            lines.push(Line::from(
+                send.text.clone().unwrap_or_else(|| "(empty)".into()),
+            ));
+        }
+        lines.push(Line::from(""));
+        let fmt_date = |d: &Option<String>| {
+            d.as_deref()
+                .map(crate::send_form::format_local_datetime)
+                .unwrap_or_else(|| "never".into())
+        };
+        let access = match send.max_access_count {
+            Some(max) => format!("{} / {max}", send.access_count),
+            None => format!("{} (no limit)", send.access_count),
+        };
+        let yes_no = |b: bool| if b { "yes" } else { "no" };
+        for (label, value) in [
+            ("Password", yes_no(send.has_password).to_string()),
+            ("Accesses", access),
+            ("Expires", fmt_date(&send.expiration_date)),
+            ("Deletes", fmt_date(&send.deletion_date)),
+            ("Hide email", yes_no(send.hide_email).to_string()),
+            ("Disabled", yes_no(send.disabled).to_string()),
+        ] {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{label:<11}"), Style::default().fg(MUTED)),
+                Span::raw(value),
+            ]));
+        }
+        if let Some(notes) = send.notes.as_deref().filter(|n| !n.is_empty()) {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Notes      ", Style::default().fg(MUTED)),
+                Span::raw(notes.to_string()),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "e edit · d delete · L copy link · O open link",
+            Style::default().fg(MUTED),
+        )));
         frame.render_widget(
-            Paragraph::new(format!(
-                "{}\n\n{text}\n\n(e edit · d delete · L copy link)",
-                send.name
-            ))
+            Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
                 .block(Block::default()),
             inner,
@@ -366,12 +438,16 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     match item.item_type {
         ItemType::Login => {
             kv(&mut lines, width, "Username", item.username.as_deref(), "y");
-            let pw = if app.reveal_secrets {
-                item.password.as_deref()
+            if app.reveal_secrets {
+                if let Some(pw) = item.password.as_deref() {
+                    kv_password(&mut lines, width, "Password", pw, "c");
+                } else {
+                    kv(&mut lines, width, "Password", None, "c");
+                }
             } else {
-                item.password.as_deref().map(|_| "••••••••••")
-            };
-            kv(&mut lines, width, "Password", pw, "c");
+                let pw = item.password.as_deref().map(|_| "••••••••••");
+                kv(&mut lines, width, "Password", pw, "c");
+            }
             let totp_label = if let Some(display) = totp_now {
                 let secs = display.remaining;
                 if app.reveal_secrets {
@@ -398,14 +474,34 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             }
             for (i, field) in item.custom_fields.iter().enumerate().take(9) {
                 let slot = (i + 1).to_string();
-                let value = if field.hidden && !app.reveal_secrets {
+                let value = if field.hidden() && !app.reveal_secrets {
                     Some("••••••")
                 } else if field.value.is_empty() {
                     None
                 } else {
                     Some(field.value.as_str())
                 };
-                kv(&mut lines, width, &field.name, value, &slot);
+                let label = if matches!(
+                    field.kind,
+                    crate::models::CustomFieldKind::Boolean
+                        | crate::models::CustomFieldKind::Linked
+                ) {
+                    format!("{} [{}]", field.name, field.kind.label())
+                } else {
+                    field.name.clone()
+                };
+                kv(&mut lines, width, &label, value, &slot);
+            }
+            for (i, pk) in item.passkeys.iter().enumerate() {
+                let label = if i == 0 { "Passkey" } else { "" };
+                let mut value = pk.label();
+                if pk.discoverable {
+                    value.push_str(" · discoverable");
+                }
+                if let Some(date) = pk.creation_date.as_deref() {
+                    value.push_str(&format!(" · {date}"));
+                }
+                kv(&mut lines, width, label, Some(&value), "");
             }
         }
         ItemType::Card => {
@@ -416,7 +512,16 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                 item.cardholder_name.as_deref(),
                 "",
             );
-            kv(&mut lines, width, "Brand", item.card_brand.as_deref(), "");
+            let detected = item
+                .card_number
+                .as_deref()
+                .and_then(vault_session::detect_card_brand);
+            let brand = item
+                .card_brand
+                .as_deref()
+                .or(detected)
+                .map(|b| b.to_string());
+            kv(&mut lines, width, "Brand", brand.as_deref(), "");
             let masked_owned = item.card_number.as_deref().map(mask_card);
             let number = if app.reveal_secrets {
                 item.card_number.as_deref()
@@ -424,8 +529,28 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                 masked_owned.as_deref()
             };
             kv(&mut lines, width, "Number", number, "m");
+            if let Some(num) = item.card_number.as_deref() {
+                if app.reveal_secrets && !vault_session::luhn_valid(num) {
+                    lines.push(Line::from(Span::styled(
+                        "  ⚠ Card number fails Luhn check",
+                        Style::default().fg(DANGER),
+                    )));
+                }
+            }
             if let (Some(m), Some(y)) = (&item.card_exp_month, &item.card_exp_year) {
-                kv(&mut lines, width, "Expires", Some(&format!("{m}/{y}")), "x");
+                let exp = format!("{m}/{y}");
+                kv(&mut lines, width, "Expires", Some(&exp), "x");
+                if vault_session::card_is_expired(m, y) {
+                    lines.push(Line::from(Span::styled(
+                        "  ⚠ Card expired",
+                        Style::default().fg(DANGER),
+                    )));
+                } else if vault_session::card_expires_soon(m, y, 2) {
+                    lines.push(Line::from(Span::styled(
+                        "  ⚠ Card expires soon",
+                        Style::default().fg(FAV),
+                    )));
+                }
             }
             let code = if app.reveal_secrets {
                 item.card_code.as_deref()
@@ -435,7 +560,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             kv(&mut lines, width, "CVC", code, "v");
         }
         ItemType::Identity => {
-            kv(&mut lines, width, "Title", item.identity_title.as_deref(), "");
+            kv(
+                &mut lines,
+                width,
+                "Title",
+                item.identity_title.as_deref(),
+                "",
+            );
             kv(&mut lines, width, "Name", item.identity_name.as_deref(), "");
             kv(
                 &mut lines,
@@ -602,6 +733,26 @@ fn kv(lines: &mut Vec<Line>, width: u16, label: &str, value: Option<&str>, key: 
     lines.push(Line::from(spans));
 }
 
+/// Password row with digit/symbol coloring when revealed.
+fn kv_password(lines: &mut Vec<Line>, width: u16, label: &str, password: &str, key: &str) {
+    use crate::ui::theme::theme;
+    const LABEL_W: usize = 10;
+    let key_w = if key.is_empty() { 0 } else { key.len() + 1 };
+    let value_budget = (width as usize).saturating_sub(LABEL_W + key_w);
+    let shown = truncate(password, value_budget);
+    let mut spans = vec![Span::styled(
+        format!("{label:<LABEL_W$}"),
+        Style::default().fg(MUTED),
+    )];
+    spans.extend(theme().password_spans(&shown));
+    let gap = value_budget.saturating_sub(shown.chars().count());
+    if !key.is_empty() {
+        spans.push(Span::raw(" ".repeat(gap + 1)));
+        spans.push(Span::styled(key.to_string(), Style::default().fg(ACCENT)));
+    }
+    lines.push(Line::from(spans));
+}
+
 fn mask_card(num: &str) -> String {
     let digits: String = num.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() >= 4 {
@@ -612,16 +763,17 @@ fn mask_card(num: &str) -> String {
 }
 
 fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
-    let lock = if app.screen == crate::app::Screen::Vault && app.auto_lock_minutes.is_none() {
-        "off".to_string()
-    } else {
-        app.lock_remaining()
-            .map(|d| {
-                let secs = d.as_secs();
-                format!("{:02}:{:02}", secs / 60, secs % 60)
-            })
-            .unwrap_or_else(|| "locked".into())
-    };
+    let lock =
+        if app.screen == crate::app::Screen::Vault && app.effective_auto_lock_minutes().is_none() {
+            "off".to_string()
+        } else {
+            app.lock_remaining()
+                .map(|d| {
+                    let secs = d.as_secs();
+                    format!("{:02}:{:02}", secs / 60, secs % 60)
+                })
+                .unwrap_or_else(|| "locked".into())
+        };
     let clip = app
         .clipboard_remaining()
         .map(|d| format!("clip {}s  ", d.as_secs()))
@@ -640,7 +792,24 @@ fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!(" {profile} "), Style::default().fg(MUTED)),
         Span::styled(format!(" {}", app.status), Style::default().fg(FG)),
     ];
-    let right = vec![
+    let mut right = Vec::new();
+    if let Some((text, level)) = app.watchtower_badge() {
+        let color = match level {
+            crate::app::BadgeLevel::Ok => Color::Rgb(115, 218, 202),
+            crate::app::BadgeLevel::Warn => DANGER,
+        };
+        right.push(Span::styled(
+            format!("{text}  "),
+            Style::default().fg(color),
+        ));
+    }
+    if app.power.sort != crate::app::SortMode::Name {
+        right.push(Span::styled(
+            format!("sort:{}  ", app.power.sort.label()),
+            Style::default().fg(MUTED),
+        ));
+    }
+    right.extend(vec![
         Span::styled(clip, Style::default().fg(FAV)),
         Span::styled("lock ", Style::default().fg(MUTED)),
         Span::styled(lock, Style::default().fg(FG)),
@@ -648,7 +817,7 @@ fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("profiles ", Style::default().fg(MUTED)),
         Span::styled("? ", Style::default().fg(ACCENT)),
         Span::styled("help ", Style::default().fg(MUTED)),
-    ];
+    ]);
     let used: usize = left
         .iter()
         .chain(right.iter())

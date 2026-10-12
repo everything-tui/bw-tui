@@ -75,9 +75,7 @@ impl ParsedSearch {
         }
         if let Some(ref want) = self.folder {
             let hay = folder_name.unwrap_or("");
-            if !hay.eq_ignore_ascii_case(want)
-                && item.folder_id.as_deref() != Some(want.as_str())
-            {
+            if !hay.eq_ignore_ascii_case(want) && item.folder_id.as_deref() != Some(want.as_str()) {
                 return false;
             }
         }

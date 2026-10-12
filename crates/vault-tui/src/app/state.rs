@@ -1,6 +1,6 @@
 //! Application state machine for the Vaultwarden TUI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -8,27 +8,38 @@ use chrono::{DateTime, Local};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use vault_session::{
-    app_data_dir, apply_generator_policy, build_health_report, find_reused_passwords,
-    generate_passphrase_opts, generate_password_checked, generate_username_catchall,
-    generate_username_plus_address, generate_username_word, hibp_password_pwned_count,
-    normalize_server_url,
-    plaintext_token_allowed, profile_dir, DecryptedUri, GeneratorOptions, ItemType as SessionItemType,
-    CardDraft, IdentityDraft, LoginDraft, LoginResult, NoteDraft, PassphraseOptions, Session,
-    SessionError, SshKeyDraft,
-    SessionStatus,
+    app_data_dir, apply_generator_policy, find_reused_passwords, generate_passphrase_opts,
+    generate_password_checked, generate_username_catchall, generate_username_plus_address,
+    generate_username_word, hibp_password_pwned_count, normalize_server_url,
+    plaintext_token_allowed, profile_dir, CardDraft, DecryptedUri, GeneratorOptions, IdentityDraft,
+    ItemType as SessionItemType, LoginDraft, LoginResult, NoteDraft, OrgCollectionGroup,
+    PassphraseOptions, Session, SessionError, SessionStatus, SshKeyDraft, TimeoutAction,
     TotpDisplay, VaultHealthReport,
 };
 use zeroize::Zeroize;
 
 use crate::config::{load_config_from, AppConfig};
 use crate::folder_tree::nested_folder_entries;
+use crate::keybinds::KeyMap;
 use crate::mock::{sample_folders, sample_items, with_folder_counts};
 use crate::models::{DecryptedItem, FilterKind, FolderView, ItemType, SidebarEntry};
-use crate::search::parse_search_query;
 use crate::profiles::{
     allocate_profile_id, create_profile, delete_profile, load_registry_from, parse_auto_lock_input,
     parse_clipboard_clear_input, profile_has_auth, set_active, set_lock_on_profile_switch,
     update_profile, update_profile_credentials, ProfilesFile, VaultProfile,
+};
+use crate::search::parse_search_query;
+use crate::system_lock::{SystemLockEvent, SystemLockMonitor};
+use crate::ui::init_theme;
+
+mod account_tools;
+mod auth_ext;
+pub use account_tools::{
+    account_tools_handle_key, tool_fields, AccountToolsState, ToolScreen, TOOL_MENU,
+};
+pub use auth_ext::{
+    auth_ext_handle_2fa_key, auth_ext_handle_login_key, auth_ext_handle_wait_key, AuthExtState,
+    WaitKind, WaitState,
 };
 
 /// High-level screen.
@@ -36,6 +47,8 @@ use crate::profiles::{
 pub enum Screen {
     Login,
     TwoFactor,
+    /// Waiting for another device to approve, or for the SSO browser callback.
+    AuthWait,
     Unlock,
     Vault,
 }
@@ -216,6 +229,12 @@ pub enum ProfileEditField {
     Email,
     AutoLock,
     ClipboardClear,
+    /// Toggle: lock vs log out when the vault timeout fires.
+    TimeoutAction,
+    /// Toggle: apply the timeout action at TUI startup.
+    TimeoutOnStartup,
+    /// Toggle: apply the timeout action on system sleep / screen lock.
+    LockOnSystemLock,
 }
 
 impl ProfileEditField {
@@ -225,31 +244,80 @@ impl ProfileEditField {
             Self::Server => Self::Email,
             Self::Email => Self::AutoLock,
             Self::AutoLock => Self::ClipboardClear,
-            Self::ClipboardClear => Self::Name,
+            Self::ClipboardClear => Self::TimeoutAction,
+            Self::TimeoutAction => Self::TimeoutOnStartup,
+            Self::TimeoutOnStartup => Self::LockOnSystemLock,
+            Self::LockOnSystemLock => Self::Name,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Name => Self::ClipboardClear,
+            Self::Name => Self::LockOnSystemLock,
             Self::Server => Self::Name,
             Self::Email => Self::Server,
             Self::AutoLock => Self::Email,
             Self::ClipboardClear => Self::AutoLock,
+            Self::TimeoutAction => Self::ClipboardClear,
+            Self::TimeoutOnStartup => Self::TimeoutAction,
+            Self::LockOnSystemLock => Self::TimeoutOnStartup,
         }
+    }
+
+    /// True for on/off or choice rows (toggled with Space / ←/→ rather than typed).
+    pub fn is_toggle(self) -> bool {
+        matches!(
+            self,
+            Self::TimeoutAction | Self::TimeoutOnStartup | Self::LockOnSystemLock
+        )
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum DeleteTarget {
-    Item { id: String, name: String },
-    Folder { id: String, name: String },
-    Send { id: String, name: String },
+    Item {
+        id: String,
+        name: String,
+        /// When true, confirm permanently deletes (item already in trash).
+        permanent: bool,
+    },
+    Folder {
+        id: String,
+        name: String,
+    },
+    Send {
+        id: String,
+        name: String,
+    },
     Attachment {
         cipher_id: String,
         attachment_id: String,
         name: String,
     },
+    /// Purge all items currently in trash.
+    EmptyTrash {
+        count: usize,
+    },
+    /// Soft-delete many marked vault items.
+    BulkItems {
+        ids: Vec<String>,
+        count: usize,
+    },
+}
+
+/// Step in the share-to-organization wizard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareToOrgStep {
+    PickOrganization,
+    PickCollections,
+}
+
+/// Soft-delete undo window (press `u` to restore).
+#[derive(Debug, Clone)]
+pub struct PendingUndoDelete {
+    pub item_id: String,
+    pub item_name: String,
+    pub expires_at: Instant,
 }
 
 /// Sub-mode of the profile manager overlay.
@@ -268,6 +336,9 @@ pub enum ProfileManagerMode {
         /// Same parse rules as today: off/0/empty → None; 1..=1440 → Some
         auto_lock_input: String,
         clipboard_clear_input: String,
+        timeout_action: TimeoutAction,
+        timeout_on_startup: bool,
+        lock_on_system_lock: bool,
         field: ProfileEditField,
         error: Option<String>,
     },
@@ -288,8 +359,11 @@ struct MockParked {
 
 /// Modal overlays on top of the vault (or login) screen.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Overlay {
     None,
+    /// P4 power-user overlays (QR, attachments, domain rules, SSH agent confirmation).
+    Power(crate::app::PowerOverlay),
     ItemForm {
         editing_id: Option<String>,
         name: String,
@@ -357,16 +431,21 @@ pub enum Overlay {
         hibp_opt_in: bool,
         hibp_busy: bool,
         hibp_results: Vec<HibpResultLine>,
+        /// Opt-in HIBP breached-account (email) lookups; needs `BW_TUI_HIBP_API_KEY`.
+        hibp_email_opt_in: bool,
+        hibp_email_results: Vec<HibpResultLine>,
+        /// Computed once when the overlay opens (zxcvbn is too slow to run per frame).
+        report: Box<VaultHealthReport>,
     },
     AccountSettings {
         section: usize,
         status: String,
     },
     SendForm {
-        editing_id: Option<String>,
-        name: String,
-        text: String,
-        field: SendField,
+        form: Box<crate::send_form::SendFormState>,
+    },
+    ReceiveSend {
+        state: Box<crate::send_form::ReceiveSendState>,
     },
     AttachmentPath {
         path: String,
@@ -389,13 +468,37 @@ pub enum Overlay {
         name: String,
         title: String,
         first_name: String,
+        middle_name: String,
         last_name: String,
         email: String,
         phone: String,
         username: String,
+        company: String,
+        address1: String,
+        address2: String,
+        address3: String,
+        city: String,
+        state: String,
+        postal_code: String,
+        country: String,
+        ssn: String,
+        passport: String,
+        license: String,
         notes: String,
         reprompt: bool,
         field: IdentityField,
+    },
+    /// Edit custom fields for a cipher.
+    CustomFieldsForm {
+        item_id: String,
+        fields: Vec<crate::models::CustomFieldView>,
+        selected: usize,
+        /// When editing a single field: index into fields, or None for list mode.
+        editing: Option<usize>,
+        edit_name: String,
+        edit_value: String,
+        edit_type: crate::models::CustomFieldKind,
+        edit_focus: CustomFieldEditFocus,
     },
     SshKeyForm {
         editing_id: Option<String>,
@@ -410,12 +513,22 @@ pub enum Overlay {
         item_id: String,
         selected: usize,
     },
+    ShareToOrg {
+        item_ids: Vec<String>,
+        groups: Vec<OrgCollectionGroup>,
+        org_index: usize,
+        step: ShareToOrgStep,
+        collection_cursor: usize,
+        selected_collections: HashSet<String>,
+    },
     PinSetup {
         pin: String,
         confirm: String,
         field: PinSetupField,
         status: String,
     },
+    /// Account tools hub (KDF, deauthorize, 2FA setup, device approvals, forwarders, …).
+    AccountTools(Box<AccountToolsState>),
     ChangeMasterPassword {
         old: String,
         new: String,
@@ -434,9 +547,16 @@ pub enum PendingAction {
     Unlock,
     UnlockPin,
     ResendEmail2fa,
+    DeviceLoginStart,
+    DeviceLoginPoll,
+    SsoStart,
+    SsoFinish,
     CloneItem,
     BackgroundSync,
     HibpScan,
+    HibpEmailScan,
+    /// Cheap `GET /accounts/revision-date` probe; full sync only when it changed.
+    RevisionCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,6 +571,10 @@ pub enum UsernameKind {
     Word,
     Plus,
     Catchall,
+    /// SimpleLogin alias (API token in keychain).
+    SimpleLogin,
+    /// addy.io alias (API token in keychain).
+    AddyIo,
 }
 
 #[derive(Debug, Clone)]
@@ -460,9 +584,10 @@ pub struct HibpResultLine {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendField {
+pub enum CustomFieldEditFocus {
     Name,
-    Text,
+    Value,
+    Type,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,41 +638,59 @@ pub enum IdentityField {
     Name,
     Title,
     FirstName,
+    MiddleName,
     LastName,
     Email,
     Phone,
     Username,
+    Company,
+    Address1,
+    Address2,
+    Address3,
+    City,
+    State,
+    PostalCode,
+    Country,
+    Ssn,
+    Passport,
+    License,
     Notes,
     Reprompt,
 }
 
 impl IdentityField {
+    const ORDER: &'static [IdentityField] = &[
+        Self::Name,
+        Self::Title,
+        Self::FirstName,
+        Self::MiddleName,
+        Self::LastName,
+        Self::Email,
+        Self::Phone,
+        Self::Username,
+        Self::Company,
+        Self::Address1,
+        Self::Address2,
+        Self::Address3,
+        Self::City,
+        Self::State,
+        Self::PostalCode,
+        Self::Country,
+        Self::Ssn,
+        Self::Passport,
+        Self::License,
+        Self::Notes,
+        Self::Reprompt,
+    ];
+
     pub fn next(self) -> Self {
-        match self {
-            Self::Name => Self::Title,
-            Self::Title => Self::FirstName,
-            Self::FirstName => Self::LastName,
-            Self::LastName => Self::Email,
-            Self::Email => Self::Phone,
-            Self::Phone => Self::Username,
-            Self::Username => Self::Notes,
-            Self::Notes => Self::Reprompt,
-            Self::Reprompt => Self::Name,
-        }
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + 1) % Self::ORDER.len()]
     }
 
     pub fn prev(self) -> Self {
-        match self {
-            Self::Name => Self::Reprompt,
-            Self::Title => Self::Name,
-            Self::FirstName => Self::Title,
-            Self::LastName => Self::FirstName,
-            Self::Email => Self::LastName,
-            Self::Phone => Self::Email,
-            Self::Username => Self::Phone,
-            Self::Notes => Self::Username,
-            Self::Reprompt => Self::Notes,
-        }
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + Self::ORDER.len() - 1) % Self::ORDER.len()]
     }
 }
 
@@ -661,6 +804,8 @@ pub struct App {
     pub two_factor_providers: Vec<u8>,
     /// Remember this device after successful 2FA (Bitwarden device token).
     pub remember_2fa_device: bool,
+    /// 2FA picker / new-device OTP / device login / SSO state.
+    pub auth_ext: AuthExtState,
     pub form_error: Option<String>,
     pub unlock_use_pin: bool,
     pub unlock_pin: String,
@@ -677,6 +822,8 @@ pub struct App {
     pub selected_item: usize,
     pub focus: FocusPane,
     pub visible: Vec<usize>,
+    /// Multi-select marks for bulk share / delete (`Space` in the item list).
+    pub selected_ids: HashSet<String>,
 
     // --- Search ---
     pub searching: bool,
@@ -716,9 +863,19 @@ pub struct App {
     pub pending: Option<PendingAction>,
     /// Backup of ItemForm when opening the generator from it.
     pub item_form_backup: Option<Overlay>,
-    /// Loaded from `config.toml` (theme, generator defaults, keybinding stubs).
+    /// Power-user feature state (toasts, sort, copy sequence, auto-type, QR, …).
+    pub power: crate::app::PowerState,
+    /// Loaded from `config.toml` (theme, generator defaults, keybindings).
     pub config: AppConfig,
+    /// Resolved keybindings (defaults + config overrides).
+    pub keymap: KeyMap,
+    /// Soft-delete undo window.
+    pub pending_undo: Option<PendingUndoDelete>,
     last_auto_sync: Instant,
+    last_revision_check: Instant,
+    /// Lazily started watcher for system sleep / screen lock.
+    system_lock: Option<SystemLockMonitor>,
+    system_lock_probed: bool,
 }
 
 impl App {
@@ -763,6 +920,9 @@ impl App {
                 auto_lock_minutes: Some(15),
                 allow_plaintext_token: false,
                 clipboard_clear_secs: 30,
+                timeout_action: vault_session::TimeoutAction::Lock,
+                timeout_on_startup: false,
+                lock_on_system_lock: false,
             });
 
         let cli_server = server.filter(|s| !s.is_empty());
@@ -796,6 +956,16 @@ impl App {
         let auto_lock_minutes = active.auto_lock_minutes;
         let clipboard_clear_secs = active.clipboard_clear_secs;
         let config = load_config_from(&data_root);
+        let custom = if config.colors.has_any() {
+            Some(config.colors.to_custom())
+        } else {
+            None
+        };
+        init_theme(&config.theme, custom.as_ref());
+        let keymap = KeyMap::resolve(&config.keybindings);
+        for w in &keymap.warnings {
+            tracing::warn!("keybinding: {w}");
+        }
         let mut app = Self {
             screen: Screen::Login,
             should_quit: false,
@@ -822,6 +992,7 @@ impl App {
             totp_code: String::new(),
             two_factor_providers: Vec::new(),
             remember_2fa_device: false,
+            auth_ext: AuthExtState::default(),
             form_error: None,
             unlock_use_pin: false,
             unlock_pin: String::new(),
@@ -836,6 +1007,7 @@ impl App {
             selected_item: 0,
             focus: FocusPane::Items,
             visible: Vec::new(),
+            selected_ids: HashSet::new(),
             searching: false,
             search_query: String::new(),
             status: if mock {
@@ -863,13 +1035,57 @@ impl App {
             busy: false,
             pending: None,
             item_form_backup: None,
+            power: crate::app::PowerState::new(&config),
             config,
+            keymap,
+            pending_undo: None,
             last_auto_sync: Instant::now(),
+            last_revision_check: Instant::now(),
+            system_lock: None,
+            system_lock_probed: false,
         };
         if !app.email.is_empty() {
             app.login_field = LoginField::Password;
         }
         Ok(app)
+    }
+
+    /// Copy text via session clipboard, falling back to OSC 52 over SSH.
+    pub fn copy_text_with_fallback(&mut self, value: &str, label: &str) -> bool {
+        if value.is_empty() {
+            self.set_status(format!("No {label} on this item"));
+            return false;
+        }
+        let session_ok = if let Some(session) = self.session.as_mut() {
+            session.copy_text(value).is_ok()
+        } else {
+            false
+        };
+        if session_ok {
+            self.set_status(format!("{label} copied"));
+            self.touch();
+            return true;
+        }
+        if crate::osc52::try_copy_osc52(value) {
+            self.set_status(format!("{label} copied (OSC 52)"));
+            self.touch();
+            return true;
+        }
+        if self.using_mock {
+            if let Some(mut prev) = self.clipboard_demo.take() {
+                prev.zeroize();
+            }
+            self.clipboard_demo = Some(value.to_string());
+            self.clipboard_clear_at = Some(Instant::now() + self.demo_clipboard_duration());
+            self.set_status(format!(
+                "{label} copied (demo) — clears in {}s",
+                self.demo_clipboard_duration().as_secs()
+            ));
+            self.touch();
+            return true;
+        }
+        self.set_status("Copy failed (no clipboard / OSC 52)");
+        false
     }
 
     pub fn profile_data_dir(&self) -> PathBuf {
@@ -908,10 +1124,58 @@ impl App {
             .profiles
             .get(&self.active_profile_id)
             .and_then(|p| p.auto_lock_minutes);
+        let action = self
+            .profiles
+            .get(&self.active_profile_id)
+            .map(|p| p.timeout_action)
+            .unwrap_or_default();
         self.auto_lock_minutes = minutes;
         if let Some(session) = self.session.as_mut() {
             session.set_auto_lock(minutes);
+            session.set_timeout_action(action);
         }
+    }
+
+    /// Idle timeout actually in force (profile value capped by org policy type 9).
+    pub fn effective_auto_lock_minutes(&self) -> Option<u64> {
+        match self.session.as_ref() {
+            Some(session) => session.effective_auto_lock_minutes(),
+            None => self.auto_lock_minutes,
+        }
+    }
+
+    /// Org vault-timeout policy for a profile's live session, if any.
+    pub fn vault_timeout_policy_for(&self, id: &str) -> Option<vault_session::VaultTimeoutPolicy> {
+        let session = if id == self.active_profile_id {
+            self.session.as_ref()
+        } else {
+            self.background_sessions.get(id)
+        }?;
+        let policy = session.vault_timeout_policy();
+        policy.is_active().then_some(policy)
+    }
+
+    /// Ensure `auto-lock` minutes (profile edit) obey org policy type 9.
+    fn check_timeout_policy(&self, id: &str, minutes: Option<u64>) -> Result<(), String> {
+        let Some(policy) = self.vault_timeout_policy_for(id) else {
+            return Ok(());
+        };
+        if let Some(max) = policy.max_minutes {
+            match minutes {
+                None => {
+                    return Err(format!(
+                        "Organization policy limits the vault timeout to {max} min — \"never\" is not allowed"
+                    ))
+                }
+                Some(m) if m > max => {
+                    return Err(format!(
+                        "Organization policy limits the vault timeout to {max} min"
+                    ))
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub fn apply_clipboard_clear_from_profile(&mut self) {
@@ -998,7 +1262,11 @@ impl App {
         }
     }
 
-    fn gate_reprompt(&mut self, item: &DecryptedItem, then: PendingRepromptAction) -> bool {
+    pub(crate) fn gate_reprompt(
+        &mut self,
+        item: &DecryptedItem,
+        then: PendingRepromptAction,
+    ) -> bool {
         if !item.reprompt || self.reprompt_granted(&item.id) {
             return false;
         }
@@ -1136,16 +1404,22 @@ impl App {
             Some(PendingAction::Unlock) => self.submit_unlock().await,
             Some(PendingAction::UnlockPin) => self.submit_unlock_pin().await,
             Some(PendingAction::ResendEmail2fa) => self.resend_email_2fa().await,
+            Some(PendingAction::DeviceLoginStart) => self.start_device_login().await,
+            Some(PendingAction::DeviceLoginPoll) => self.poll_device_login().await,
+            Some(PendingAction::SsoStart) => self.start_sso().await,
+            Some(PendingAction::SsoFinish) => self.finish_sso().await,
             Some(PendingAction::CloneItem) => self.clone_selected_item().await,
             Some(PendingAction::BackgroundSync) => self.sync_vault().await,
             Some(PendingAction::HibpScan) => self.run_hibp_scan().await,
+            Some(PendingAction::HibpEmailScan) => self.run_hibp_email_scan().await,
+            Some(PendingAction::RevisionCheck) => self.check_revision().await,
             None => {}
         }
     }
 
     pub async fn resend_email_2fa(&mut self) {
-        if !self.two_factor_providers.contains(&1) {
-            self.set_status("Email 2FA provider not available");
+        if self.current_two_factor_provider() != vault_session::TWO_FACTOR_EMAIL {
+            self.set_status("Switch to Email 2FA to resend (Tab / j k)");
             return;
         }
         if self.password.is_empty() {
@@ -1224,6 +1498,9 @@ impl App {
             }
         };
         self.configure_session_persist(&mut session);
+        if let Some(otp) = self.auth_ext.pending_new_device_otp.take() {
+            session.set_new_device_otp(Some(&otp));
+        }
 
         let login_result = if self.login_auth_mode == LoginAuthMode::ApiKey {
             if self.api_client_id.trim().is_empty() || self.api_client_secret.is_empty() {
@@ -1261,9 +1538,14 @@ impl App {
                 self.session = Some(session);
                 self.apply_auto_lock_from_profile();
                 self.two_factor_providers = providers;
+                self.auth_ext.two_factor_selected = 0;
+                self.auth_ext.new_device_mode = false;
                 self.totp_code.clear();
                 self.screen = Screen::TwoFactor;
                 self.set_status("Two-factor authentication required");
+            }
+            Err(e) if e.is_new_device_verification_required() => {
+                self.enter_new_device_mode();
             }
             Err(e) => {
                 self.form_error = Some(e.to_string());
@@ -1311,7 +1593,27 @@ impl App {
         )
         .await
         {
-            Ok(Some(session)) => {
+            Ok(Some(mut session)) => {
+                let apply_on_startup = self
+                    .profiles
+                    .get(&self.active_profile_id)
+                    .is_some_and(|p| p.timeout_on_startup);
+                if apply_on_startup {
+                    let action = self
+                        .profiles
+                        .get(&self.active_profile_id)
+                        .map(|p| p.timeout_action)
+                        .unwrap_or_default();
+                    session.set_timeout_action(action);
+                    if session.effective_timeout_action() == TimeoutAction::Logout {
+                        // Timeout-on-startup with "log out": drop the remembered session.
+                        session.logout();
+                        self.remember_login = false;
+                        self.screen = Screen::Login;
+                        self.set_status("Logged out on startup (vault timeout action)");
+                        return;
+                    }
+                }
                 if let Some(email) = session.email() {
                     self.email = email.to_string();
                 }
@@ -1542,6 +1844,9 @@ impl App {
                     auto_lock_minutes: Some(15),
                     allow_plaintext_token: false,
                     clipboard_clear_secs: 30,
+                    timeout_action: vault_session::TimeoutAction::Lock,
+                    timeout_on_startup: false,
+                    lock_on_system_lock: false,
                 });
                 Ok(id)
             }
@@ -1565,8 +1870,18 @@ impl App {
     }
 
     pub fn profile_manager_edit_save(&mut self) {
-        let (id, name, server_url, email, auto_lock_input, clipboard_clear_input, selected) =
-            match &self.overlay {
+        let (
+            id,
+            name,
+            server_url,
+            email,
+            auto_lock_input,
+            clipboard_clear_input,
+            timeout_action,
+            timeout_on_startup,
+            lock_on_system_lock,
+            selected,
+        ) = match &self.overlay {
             Overlay::ProfileManager {
                 mode:
                     ProfileManagerMode::Edit {
@@ -1576,6 +1891,9 @@ impl App {
                         email,
                         auto_lock_input,
                         clipboard_clear_input,
+                        timeout_action,
+                        timeout_on_startup,
+                        lock_on_system_lock,
                         ..
                     },
                 selected,
@@ -1586,6 +1904,9 @@ impl App {
                 email.clone(),
                 auto_lock_input.clone(),
                 clipboard_clear_input.clone(),
+                *timeout_action,
+                *timeout_on_startup,
+                *lock_on_system_lock,
                 *selected,
             ),
             _ => return,
@@ -1616,6 +1937,17 @@ impl App {
             }
         };
 
+        if let Err(e) = self.check_timeout_policy(&id, minutes) {
+            if let Overlay::ProfileManager {
+                mode: ProfileManagerMode::Edit { error, .. },
+                ..
+            } = &mut self.overlay
+            {
+                *error = Some(e);
+            }
+            return;
+        }
+
         let clipboard_secs = match parse_clipboard_clear_input(&clipboard_clear_input) {
             Ok(s) => s,
             Err(e) => {
@@ -1638,6 +1970,9 @@ impl App {
                     p.email = email.trim().to_string();
                     p.auto_lock_minutes = minutes;
                     p.clipboard_clear_secs = clipboard_secs;
+                    p.timeout_action = timeout_action;
+                    p.timeout_on_startup = timeout_on_startup;
+                    p.lock_on_system_lock = lock_on_system_lock;
                     Ok(())
                 }
                 None => Err(format!("Unknown profile '{id}'")),
@@ -1655,6 +1990,9 @@ impl App {
             .and_then(|_| {
                 if let Some(p) = self.profiles.get_mut(&id) {
                     p.clipboard_clear_secs = clipboard_secs;
+                    p.timeout_action = timeout_action;
+                    p.timeout_on_startup = timeout_on_startup;
+                    p.lock_on_system_lock = lock_on_system_lock;
                     crate::profiles::save_registry_to(&self.data_root, &self.profiles)
                 } else {
                     Ok(())
@@ -1684,6 +2022,7 @@ impl App {
         }
         if let Some(session) = self.background_sessions.get_mut(&id) {
             session.set_auto_lock(minutes);
+            session.set_timeout_action(timeout_action);
             session.set_clipboard_clear_secs(clipboard_secs);
         }
         if let Some(parked) = self.background_mocks.get_mut(&id) {
@@ -1760,6 +2099,10 @@ impl App {
             self.form_error = Some("Enter the verification code".into());
             return;
         }
+        if self.auth_ext.new_device_mode {
+            self.submit_new_device_otp().await;
+            return;
+        }
         if self.using_mock {
             self.totp_code.clear();
             self.password.zeroize();
@@ -1772,7 +2115,10 @@ impl App {
         let email = self.email.trim().to_string();
         let password = self.password.clone();
         let code = self.totp_code.trim().to_string();
-        let provider = self.two_factor_providers.first().copied().unwrap_or(0);
+        let provider = self.current_two_factor_provider();
+        let Some(code) = self.prepare_two_factor_code(provider, code) else {
+            return;
+        };
 
         if self.session.is_none() {
             self.form_error = Some("Session missing — return to login".into());
@@ -1872,7 +2218,12 @@ impl App {
         }
         let pin = self.unlock_pin.clone();
         self.busy = true;
-        let result = self.session.as_mut().unwrap().unlock_with_pin_code(&pin).await;
+        let result = self
+            .session
+            .as_mut()
+            .unwrap()
+            .unlock_with_pin_code(&pin)
+            .await;
         match result {
             Ok(()) => {
                 self.unlock_pin.zeroize();
@@ -1980,6 +2331,16 @@ impl App {
                 text: s.text.clone(),
                 notes: s.notes.clone(),
                 disabled: s.disabled,
+                is_file: s.send_type == vault_session::SEND_TYPE_FILE,
+                file_name: s.file_name.clone(),
+                file_size_name: s.file_size_name.clone(),
+                has_password: s.has_password,
+                max_access_count: s.max_access_count,
+                access_count: s.access_count,
+                expiration_date: s.expiration_date.clone(),
+                deletion_date: s.deletion_date.clone(),
+                hide_email: s.hide_email,
+                text_hidden: s.text_hidden,
             })
             .collect();
         self.rebuild_sidebar();
@@ -2150,22 +2511,14 @@ impl App {
                         .join(" "),
                     item.notes.as_deref().unwrap_or("")
                 );
-                matcher
-                    .fuzzy_match(&hay, fuzzy)
-                    .map(|score| (score, idx))
+                matcher.fuzzy_match(&hay, fuzzy).map(|score| (score, idx))
             })
             .collect();
 
         if !fuzzy.is_empty() {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         } else {
-            scored.sort_by(|a, b| {
-                let ia = &self.items[a.1];
-                let ib = &self.items[b.1];
-                ib.favorite
-                    .cmp(&ia.favorite)
-                    .then_with(|| ia.name.to_lowercase().cmp(&ib.name.to_lowercase()))
-            });
+            self.sort_unscored(&mut scored);
         }
 
         self.visible = scored.into_iter().map(|(_, idx)| idx).collect();
@@ -2301,6 +2654,8 @@ impl App {
         self.status = msg.into();
         self.status_sticky = false;
         self.status_expires = Some(Instant::now() + Duration::from_secs(4));
+        let toast = self.status.clone();
+        self.toast_from_status(&toast);
     }
 
     fn set_sticky_status(&mut self, msg: impl Into<String>) {
@@ -2348,6 +2703,28 @@ impl App {
         self.status = self.vault_idle_status();
         self.status_sticky = true;
         self.status_expires = None;
+    }
+
+    /// Live-update poll: only reloads the vault when the server's revision date changed.
+    /// Failures are silent (the periodic full sync / manual sync report errors).
+    pub async fn check_revision(&mut self) {
+        if self.using_mock {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if session.status() != SessionStatus::Unlocked {
+            return;
+        }
+        match session.sync_if_changed().await {
+            Ok(vault_session::SyncOutcome::Synced) => {
+                self.reload_from_session();
+                self.mark_synced();
+                self.set_status("Vault updated from server");
+            }
+            Ok(vault_session::SyncOutcome::Unchanged) | Err(_) => {}
+        }
     }
 
     pub async fn sync_vault(&mut self) {
@@ -2456,36 +2833,33 @@ impl App {
             return;
         };
         let reprompt_ok = self.reprompt_granted(&item.id);
+        let label = clipboard_kind_label(kind);
+        self.record_item_used(&item.id);
 
+        // Prefer session copy APIs (reprompt-aware) when online.
         if !self.using_mock {
             if let Some(session) = self.session.as_mut() {
                 let result = match kind {
-                    ClipboardKind::Password => session
-                        .copy_password(&item.id, reprompt_ok)
-                        .map(|_| "Password".to_string()),
-                    ClipboardKind::Username => session
-                        .copy_username(&item.id)
-                        .map(|_| "Username".to_string()),
-                    ClipboardKind::Totp => session
-                        .copy_totp(&item.id, reprompt_ok)
-                        .map(|_| "TOTP".to_string()),
+                    ClipboardKind::Password => session.copy_password(&item.id, reprompt_ok),
+                    ClipboardKind::Username => session.copy_username(&item.id),
+                    ClipboardKind::Totp => session.copy_totp(&item.id, reprompt_ok).map(|_| ()),
                     ClipboardKind::Uri => {
                         let Some(uri) = item.primary_uri().map(str::to_string) else {
                             self.set_status("No URI on this item");
                             return;
                         };
-                        session.copy_text(&uri).map(|_| "URI".to_string())
+                        session.copy_text(&uri)
                     }
                     ClipboardKind::CardNumber => item
                         .card_number
                         .as_deref()
-                        .ok_or(SessionError::Other("no card number".into()))
-                        .and_then(|v| session.copy_text(v).map(|_| "Card number".to_string())),
+                        .ok_or_else(|| SessionError::Other("no card number".into()))
+                        .and_then(|v| session.copy_text(v)),
                     ClipboardKind::CardCode => item
                         .card_code
                         .as_deref()
-                        .ok_or(SessionError::Other("no CVC".into()))
-                        .and_then(|v| session.copy_text(v).map(|_| "CVC".to_string())),
+                        .ok_or_else(|| SessionError::Other("no CVC".into()))
+                        .and_then(|v| session.copy_text(v)),
                     ClipboardKind::CardExpiry => {
                         let exp = match (&item.card_exp_month, &item.card_exp_year) {
                             (Some(m), Some(y)) => format!("{m}/{y}"),
@@ -2494,57 +2868,53 @@ impl App {
                                 return;
                             }
                         };
-                        session.copy_text(&exp).map(|_| "Expiry".to_string())
+                        session.copy_text(&exp)
                     }
                     ClipboardKind::SshPublic => item
                         .ssh_public_key
                         .as_deref()
-                        .ok_or(SessionError::Other("no public key".into()))
-                        .and_then(|v| session.copy_text(v).map(|_| "SSH public key".to_string())),
+                        .ok_or_else(|| SessionError::Other("no public key".into()))
+                        .and_then(|v| session.copy_text(v)),
                     ClipboardKind::SshPrivate => item
                         .ssh_private_key
                         .as_deref()
-                        .ok_or(SessionError::Other("no private key".into()))
-                        .and_then(|v| session.copy_text(v).map(|_| "SSH private key".to_string())),
+                        .ok_or_else(|| SessionError::Other("no private key".into()))
+                        .and_then(|v| session.copy_text(v)),
                     ClipboardKind::Notes => item
                         .notes
                         .as_deref()
-                        .ok_or(SessionError::Other("no notes".into()))
-                        .and_then(|v| session.copy_text(v).map(|_| "Notes".to_string())),
+                        .ok_or_else(|| SessionError::Other("no notes".into()))
+                        .and_then(|v| session.copy_text(v)),
                 };
                 match result {
-                    Ok(label) => {
+                    Ok(()) => {
                         self.clipboard_kind = Some(kind);
                         self.set_status(format!("{label} copied"));
                         self.touch();
+                        return;
                     }
                     Err(SessionError::RepromptRequired) => {
                         self.open_reprompt(item.id.clone(), PendingRepromptAction::Copy(kind));
+                        return;
                     }
-                    Err(e) => self.set_status(format!("Copy failed: {e}")),
+                    Err(SessionError::Clipboard(_)) => {
+                        // Fall through to OSC 52 / value-based copy.
+                    }
+                    Err(e) => {
+                        self.set_status(format!("Copy failed: {e}"));
+                        return;
+                    }
                 }
-                return;
             }
         }
 
         let value = self.clipboard_value_for(&item, kind);
         let Some(value) = value.filter(|s| !s.is_empty()) else {
-            self.set_status(format!("No {} on this item", clipboard_kind_label(kind)));
+            self.set_status(format!("No {label} on this item"));
             return;
         };
-
-        if let Some(mut prev) = self.clipboard_demo.take() {
-            prev.zeroize();
-        }
-        self.clipboard_demo = Some(value);
         self.clipboard_kind = Some(kind);
-        self.clipboard_clear_at = Some(Instant::now() + self.demo_clipboard_duration());
-        self.set_status(format!(
-            "{} copied (demo) — clears in {}s",
-            clipboard_kind_label(kind),
-            self.demo_clipboard_duration().as_secs()
-        ));
-        self.touch();
+        let _ = self.copy_text_with_fallback(&value, label);
     }
 
     fn clipboard_value_for(&self, item: &DecryptedItem, kind: ClipboardKind) -> Option<String> {
@@ -2589,12 +2959,38 @@ impl App {
     // Modals: create / edit / delete / folder / generator
     // -------------------------------------------------------------------------
 
+    /// Org policy gate (personal vault disabled / restricted item types) for creating items.
+    /// Sets a status message and returns false when blocked.
+    fn item_creation_allowed(&mut self, ty: SessionItemType) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return true;
+        };
+        match session.check_item_creation_allowed(ty) {
+            Ok(()) => true,
+            Err(e) => {
+                self.set_status(e.to_string());
+                false
+            }
+        }
+    }
+
     pub fn open_new_item_picker(&mut self) {
+        if let Some(session) = self.session.as_ref() {
+            if session.personal_vault_blocked_by_policy() {
+                self.set_status(
+                    "Organization policy: personal vault is disabled — cannot create items",
+                );
+                return;
+            }
+        }
         self.overlay = Overlay::NewItemType { selected: 0 };
         self.touch();
     }
 
     pub fn open_new_login(&mut self) {
+        if !self.item_creation_allowed(SessionItemType::Login) {
+            return;
+        }
         self.overlay = Overlay::ItemForm {
             editing_id: None,
             name: String::new(),
@@ -2614,6 +3010,9 @@ impl App {
     }
 
     pub fn open_new_note(&mut self) {
+        if !self.item_creation_allowed(SessionItemType::SecureNote) {
+            return;
+        }
         self.overlay = Overlay::NoteForm {
             editing_id: None,
             name: String::new(),
@@ -2639,9 +3038,7 @@ impl App {
     }
 
     fn item_editable(&self, id: &str) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|s| s.item_editable(id))
+        self.session.as_ref().is_some_and(|s| s.item_editable(id))
     }
 
     pub fn item_editable_public(&self, id: &str) -> bool {
@@ -2653,11 +3050,7 @@ impl App {
             return;
         };
         if !self.item_editable(&item.id) {
-            self.set_status("Cannot edit item (missing org/item key)");
-            return;
-        }
-        if item.organization_id.is_some() || item.has_item_key {
-            self.set_status("Organization items cannot be edited yet");
+            self.set_status("Cannot edit item (read-only or missing key)");
             return;
         }
         match item.item_type {
@@ -2718,10 +3111,22 @@ impl App {
                     name: item.name,
                     title: item.identity_title.unwrap_or_default(),
                     first_name: item.identity_first_name.unwrap_or_default(),
+                    middle_name: item.identity_middle_name.unwrap_or_default(),
                     last_name: item.identity_last_name.unwrap_or_default(),
                     email: item.identity_email.unwrap_or_default(),
                     phone: item.identity_phone.unwrap_or_default(),
                     username: item.identity_username.unwrap_or_default(),
+                    company: item.identity_company.unwrap_or_default(),
+                    address1: item.identity_address1.unwrap_or_default(),
+                    address2: item.identity_address2.unwrap_or_default(),
+                    address3: item.identity_address3.unwrap_or_default(),
+                    city: item.identity_city.unwrap_or_default(),
+                    state: item.identity_state.unwrap_or_default(),
+                    postal_code: item.identity_postal_code.unwrap_or_default(),
+                    country: item.identity_country.unwrap_or_default(),
+                    ssn: item.identity_ssn.unwrap_or_default(),
+                    passport: item.identity_passport_number.unwrap_or_default(),
+                    license: item.identity_license_number.unwrap_or_default(),
                     notes: item.notes.unwrap_or_default(),
                     reprompt: item.reprompt,
                     field: IdentityField::Name,
@@ -2751,10 +3156,6 @@ impl App {
             self.set_status("No item selected");
             return;
         };
-        if item.organization_id.is_some() || item.has_item_key {
-            self.set_status("Organization items cannot be moved yet");
-            return;
-        }
         let selected = item
             .folder_id
             .as_ref()
@@ -2780,9 +3181,7 @@ impl App {
         let folder_id = if *selected == 0 {
             None
         } else {
-            self.folders
-                .get(*selected - 1)
-                .and_then(|f| f.id.clone())
+            self.folders.get(*selected - 1).and_then(|f| f.id.clone())
         };
         if self.using_mock {
             if let Some(item) = self.items.iter_mut().find(|i| i.id == item_id) {
@@ -2817,16 +3216,200 @@ impl App {
         self.busy = false;
     }
 
+    pub fn toggle_bulk_select_current(&mut self) {
+        if !matches!(self.focus, FocusPane::Items | FocusPane::Detail) {
+            return;
+        }
+        if matches!(self.current_filter(), FilterKind::Sends | FilterKind::Trash) {
+            return;
+        }
+        let Some(item) = self.selected_decrypted().cloned() else {
+            return;
+        };
+        if item.deleted {
+            return;
+        }
+        if item.organization_id.is_some() {
+            self.set_status("Only personal items can be marked for share");
+            return;
+        }
+        if self.selected_ids.contains(&item.id) {
+            self.selected_ids.remove(&item.id);
+            self.set_status(format!("Unmarked \"{}\"", item.name));
+        } else {
+            self.selected_ids.insert(item.id);
+            self.set_status(format!("Marked \"{}\" (Space toggles)", item.name));
+        }
+        self.touch();
+    }
+
+    fn share_wizard_item_ids(&self) -> Option<Vec<String>> {
+        let raw: Vec<String> = if self.selected_ids.is_empty() {
+            self.selected_decrypted().map(|i| vec![i.id.clone()])?
+        } else {
+            self.selected_ids.iter().cloned().collect()
+        };
+        let ids: Vec<String> = raw
+            .into_iter()
+            .filter(|id| {
+                self.items
+                    .iter()
+                    .any(|i| i.id == *id && !i.deleted && i.organization_id.is_none())
+            })
+            .collect();
+        if ids.is_empty() {
+            None
+        } else {
+            Some(ids)
+        }
+    }
+
+    /// Writable collections for the share wizard org step (id, name).
+    pub fn share_writable_collections(&self, org_index: usize) -> Vec<(String, String)> {
+        let Overlay::ShareToOrg { groups, .. } = &self.overlay else {
+            return Vec::new();
+        };
+        writable_share_collections(groups, org_index)
+    }
+}
+
+pub fn writable_share_collections(
+    groups: &[OrgCollectionGroup],
+    org_index: usize,
+) -> Vec<(String, String)> {
+    groups
+        .get(org_index)
+        .map(|g| {
+            g.collections
+                .iter()
+                .filter(|c| c.writable())
+                .map(|c| (c.id.clone(), c.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl App {
+    pub fn open_share_to_org(&mut self) {
+        if matches!(self.current_filter(), FilterKind::Sends | FilterKind::Trash) {
+            self.set_status("Share is not available in this view");
+            return;
+        }
+        let Some(item_ids) = self.share_wizard_item_ids() else {
+            self.set_status("Select personal item(s) to share");
+            return;
+        };
+        let groups = if self.using_mock {
+            crate::mock::sample_share_targets()
+        } else if let Some(session) = self.session.as_ref() {
+            session.share_targets()
+        } else {
+            self.set_status("Not logged in");
+            return;
+        };
+        if groups.is_empty() {
+            self.set_status("No organizations with writable collections");
+            return;
+        }
+        self.overlay = Overlay::ShareToOrg {
+            item_ids,
+            groups,
+            org_index: 0,
+            step: ShareToOrgStep::PickOrganization,
+            collection_cursor: 0,
+            selected_collections: HashSet::new(),
+        };
+        self.touch();
+    }
+
+    pub async fn execute_share_to_org(&mut self) {
+        let Overlay::ShareToOrg {
+            item_ids,
+            groups,
+            org_index,
+            selected_collections,
+            ..
+        } = &self.overlay
+        else {
+            return;
+        };
+        if selected_collections.is_empty() {
+            self.set_status("Select at least one collection (Space toggles)");
+            return;
+        }
+        let org_id = groups[*org_index].organization_id.clone();
+        let cols: Vec<String> = selected_collections.iter().cloned().collect();
+        let ids = item_ids.clone();
+        let n = ids.len();
+
+        if self.using_mock {
+            for id in &ids {
+                if let Some(item) = self.items.iter_mut().find(|i| i.id == *id) {
+                    item.organization_id = Some(org_id.clone());
+                }
+            }
+            self.org_labels
+                .insert(org_id, groups[*org_index].organization_name.clone());
+            self.selected_ids.clear();
+            self.close_overlay();
+            self.rebuild_sidebar();
+            self.recompute_visible();
+            self.set_status(format!("Shared {n} item(s) to org (mock)"));
+            self.touch();
+            return;
+        }
+        if self.session_is_offline() {
+            self.set_status("Offline — share requires network");
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            self.set_status("Not logged in");
+            return;
+        };
+        self.busy = true;
+        let result = if n == 1 {
+            session.share_item(&ids[0], &org_id, &cols).await.map(|_| n)
+        } else {
+            session.bulk_share_to_org(&ids, &org_id, &cols).await
+        };
+        match result {
+            Ok(count) => {
+                self.reload_from_session();
+                self.selected_ids.clear();
+                self.close_overlay();
+                self.set_status(format!("Shared {count} item(s)"));
+                self.touch();
+            }
+            Err(e) => self.set_status(format!("Share failed: {e}")),
+        }
+        self.busy = false;
+    }
+
     pub fn open_new_identity(&mut self) {
+        if !self.item_creation_allowed(SessionItemType::Identity) {
+            return;
+        }
         self.overlay = Overlay::IdentityForm {
             editing_id: None,
             name: String::new(),
             title: String::new(),
             first_name: String::new(),
+            middle_name: String::new(),
             last_name: String::new(),
             email: String::new(),
             phone: String::new(),
             username: String::new(),
+            company: String::new(),
+            address1: String::new(),
+            address2: String::new(),
+            address3: String::new(),
+            city: String::new(),
+            state: String::new(),
+            postal_code: String::new(),
+            country: String::new(),
+            ssn: String::new(),
+            passport: String::new(),
+            license: String::new(),
             notes: String::new(),
             reprompt: false,
             field: IdentityField::Name,
@@ -2835,6 +3418,9 @@ impl App {
     }
 
     pub fn open_new_ssh_key(&mut self) {
+        if !self.item_creation_allowed(SessionItemType::SshKey) {
+            return;
+        }
         self.overlay = Overlay::SshKeyForm {
             editing_id: None,
             name: String::new(),
@@ -2848,6 +3434,9 @@ impl App {
     }
 
     pub fn open_new_card(&mut self) {
+        if !self.item_creation_allowed(SessionItemType::Card) {
+            return;
+        }
         self.overlay = Overlay::CardForm {
             editing_id: None,
             name: String::new(),
@@ -2865,6 +3454,18 @@ impl App {
     }
 
     pub fn open_delete_confirm(&mut self) {
+        if !self.selected_ids.is_empty()
+            && self.focus != FocusPane::Folders
+            && !matches!(self.current_filter(), FilterKind::Sends | FilterKind::Trash)
+        {
+            let ids: Vec<String> = self.selected_ids.iter().cloned().collect();
+            let count = ids.len();
+            self.overlay = Overlay::ConfirmDelete {
+                target: DeleteTarget::BulkItems { ids, count },
+            };
+            self.touch();
+            return;
+        }
         let Some(item) = self.selected_decrypted() else {
             self.set_status("No item selected");
             return;
@@ -2873,9 +3474,54 @@ impl App {
             target: DeleteTarget::Item {
                 id: item.id.clone(),
                 name: item.name.clone(),
+                permanent: item.deleted,
             },
         };
         self.touch();
+    }
+
+    pub fn open_empty_trash_confirm(&mut self) {
+        let count = self.items.iter().filter(|i| i.deleted).count();
+        if count == 0 {
+            self.set_status("Trash is empty");
+            return;
+        }
+        self.overlay = Overlay::ConfirmDelete {
+            target: DeleteTarget::EmptyTrash { count },
+        };
+        self.touch();
+    }
+
+    pub async fn undo_delete(&mut self) {
+        let Some(pending) = self.pending_undo.take() else {
+            self.set_status("Nothing to undo");
+            return;
+        };
+        if Instant::now() > pending.expires_at {
+            self.set_status("Undo window expired");
+            return;
+        }
+        if self.using_mock {
+            if let Some(i) = self.items.iter_mut().find(|i| i.id == pending.item_id) {
+                i.deleted = false;
+            }
+            self.rebuild_sidebar();
+            self.recompute_visible();
+            self.set_status(format!("Restored \"{}\"", pending.item_name));
+            self.touch();
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        match session.restore(&pending.item_id).await {
+            Ok(()) => {
+                self.reload_from_session();
+                self.set_status(format!("Restored \"{}\"", pending.item_name));
+                self.touch();
+            }
+            Err(e) => self.set_status(format!("Undo failed: {e}")),
+        }
     }
 
     pub fn open_delete_folder_confirm(&mut self) {
@@ -3067,6 +3713,10 @@ impl App {
                         .and_then(|e| e.split('@').nth(1))
                         .and_then(|d| generate_username_catchall(d).ok())
                         .unwrap_or_else(generate_username_word),
+                    // Aliases are created on demand (`r`), never on mode/kind switches.
+                    UsernameKind::SimpleLogin | UsernameKind::AddyIo => {
+                        "(press r to create an alias)".to_string()
+                    }
                 }
             }
             GeneratorMode::Password => {
@@ -3269,7 +3919,8 @@ impl App {
         match target {
             DeleteTarget::Folder { id, .. } => {
                 if self.using_mock {
-                    self.folders.retain(|f| f.id.as_deref() != Some(id.as_str()));
+                    self.folders
+                        .retain(|f| f.id.as_deref() != Some(id.as_str()));
                     for item in &mut self.items {
                         if item.folder_id.as_deref() == Some(id.as_str()) {
                             item.folder_id = None;
@@ -3298,15 +3949,27 @@ impl App {
                 }
                 self.busy = false;
             }
-            DeleteTarget::Item { id, .. } => {
+            DeleteTarget::Item {
+                id,
+                name,
+                permanent,
+            } => {
                 if self.using_mock {
-                    if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+                    if permanent {
+                        self.items.retain(|i| i.id != id);
+                        self.set_status("Permanently deleted (mock)");
+                    } else if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
                         item.deleted = true;
+                        self.pending_undo = Some(PendingUndoDelete {
+                            item_id: id.clone(),
+                            item_name: name.clone(),
+                            expires_at: Instant::now() + Duration::from_secs(8),
+                        });
+                        self.set_status(format!("Deleted \"{name}\" — press u to undo"));
                     }
                     self.rebuild_sidebar();
                     self.recompute_visible();
                     self.close_overlay();
-                    self.set_status("Moved to trash (mock)");
                     self.touch();
                     return;
                 }
@@ -3315,12 +3978,6 @@ impl App {
                     return;
                 };
                 self.busy = true;
-                let permanent = self
-                    .items
-                    .iter()
-                    .find(|i| i.id == id)
-                    .map(|i| i.deleted)
-                    .unwrap_or(false);
                 let result = if permanent {
                     session.hard_delete(&id).await
                 } else {
@@ -3330,15 +3987,92 @@ impl App {
                     Ok(()) => {
                         self.reload_from_session();
                         self.close_overlay();
-                        self.set_status(if permanent {
-                            "Permanently deleted"
+                        if permanent {
+                            self.set_status("Permanently deleted");
                         } else {
-                            "Moved to trash"
-                        });
+                            self.pending_undo = Some(PendingUndoDelete {
+                                item_id: id,
+                                item_name: name.clone(),
+                                expires_at: Instant::now() + Duration::from_secs(8),
+                            });
+                            self.set_status(format!("Deleted \"{name}\" — press u to undo"));
+                        }
                         self.touch();
                     }
                     Err(e) => self.set_status(format!("Delete failed: {e}")),
                 }
+                self.busy = false;
+            }
+            DeleteTarget::BulkItems { ids, count } => {
+                if self.using_mock {
+                    for id in &ids {
+                        if let Some(item) = self.items.iter_mut().find(|i| i.id == *id) {
+                            item.deleted = true;
+                        }
+                    }
+                    self.selected_ids.clear();
+                    self.rebuild_sidebar();
+                    self.recompute_visible();
+                    self.close_overlay();
+                    self.set_status(format!("Deleted {count} item(s) (mock)"));
+                    self.touch();
+                    return;
+                }
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                self.busy = true;
+                match session.bulk_soft_delete(&ids).await {
+                    Ok(n) => {
+                        self.reload_from_session();
+                        self.selected_ids.clear();
+                        self.close_overlay();
+                        self.set_status(format!("Deleted {n} item(s)"));
+                        self.touch();
+                    }
+                    Err(e) => self.set_status(format!("Bulk delete failed: {e}")),
+                }
+                self.busy = false;
+            }
+            DeleteTarget::EmptyTrash { .. } => {
+                let ids: Vec<String> = self
+                    .items
+                    .iter()
+                    .filter(|i| i.deleted)
+                    .map(|i| i.id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    self.close_overlay();
+                    self.set_status("Trash is empty");
+                    return;
+                }
+                if self.using_mock {
+                    self.items.retain(|i| !i.deleted);
+                    self.rebuild_sidebar();
+                    self.recompute_visible();
+                    self.close_overlay();
+                    self.set_status(format!("Emptied trash ({} items, mock)", ids.len()));
+                    self.touch();
+                    return;
+                }
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                self.busy = true;
+                let mut failed = 0usize;
+                for id in &ids {
+                    if session.hard_delete(id).await.is_err() {
+                        failed += 1;
+                    }
+                }
+                self.reload_from_session();
+                self.close_overlay();
+                if failed == 0 {
+                    self.set_status(format!("Emptied trash ({} items)", ids.len()));
+                } else {
+                    self.set_status(format!("Emptied trash with {failed} error(s)"));
+                }
+                self.touch();
                 self.busy = false;
             }
             DeleteTarget::Send { id, .. } => {
@@ -3366,10 +4100,7 @@ impl App {
                     return;
                 };
                 self.busy = true;
-                match session
-                    .delete_attachment(&cipher_id, &attachment_id)
-                    .await
-                {
+                match session.delete_attachment(&cipher_id, &attachment_id).await {
                     Ok(()) => {
                         self.reload_from_session();
                         self.close_overlay();
@@ -3396,7 +4127,10 @@ impl App {
 
         if self.using_mock {
             if let Some(id) = folder_id {
-                if let Some(f) = self.folders.iter_mut().find(|f| f.id.as_deref() == Some(id.as_str()))
+                if let Some(f) = self
+                    .folders
+                    .iter_mut()
+                    .find(|f| f.id.as_deref() == Some(id.as_str()))
                 {
                     f.name = name;
                 }
@@ -3422,12 +4156,12 @@ impl App {
         };
         self.busy = true;
         let result = if let Some(id) = folder_id {
-            session.rename_folder(&id, &name).await.map(|_| "Folder renamed")
-        } else {
             session
-                .create_folder(&name)
+                .rename_folder(&id, &name)
                 .await
-                .map(|_| "Folder created")
+                .map(|_| "Folder renamed")
+        } else {
+            session.create_folder(&name).await.map(|_| "Folder created")
         };
         match result {
             Ok(msg) => {
@@ -3580,19 +4314,29 @@ impl App {
 
     pub fn on_tick(&mut self) {
         let now = Instant::now();
+        self.auth_ext_tick();
 
         if let Some(session) = self.session.as_mut() {
-            let was_unlocked = session.status() == SessionStatus::Unlocked;
-            session.tick();
-            if was_unlocked && session.status() == SessionStatus::Locked {
-                self.lock();
-                self.set_sticky_status("Auto-locked after idle");
+            match session.tick() {
+                Some(TimeoutAction::Lock) => {
+                    self.lock();
+                    self.set_sticky_status("Auto-locked after idle");
+                }
+                Some(TimeoutAction::Logout) => {
+                    self.finish_forced_logout("Logged out after idle timeout");
+                }
+                None => {}
             }
         }
 
         for session in self.background_sessions.values_mut() {
             session.tick();
         }
+        // Background sessions that timed out with "log out" are gone for good.
+        self.background_sessions
+            .retain(|_, s| s.status() != SessionStatus::LoggedOut);
+
+        self.poll_system_lock();
 
         self.background_mocks
             .retain(|_, parked| Self::mock_parked_still_open(parked));
@@ -3603,6 +4347,7 @@ impl App {
                     Screen::Vault => self.vault_idle_status(),
                     Screen::Login => "Enter credentials to continue".into(),
                     Screen::TwoFactor => "Enter your two-factor code".into(),
+                    Screen::AuthWait => "Waiting for approval…".into(),
                     Screen::Unlock => "Enter master password to unlock".into(),
                 };
                 self.status_sticky = self.screen == Screen::Vault;
@@ -3642,16 +4387,116 @@ impl App {
             && !self.busy
             && self.pending.is_none()
             && !self.using_mock
-            && self.session.as_ref().is_some_and(|s| s.status() == SessionStatus::Unlocked)
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.status() == SessionStatus::Unlocked)
         {
             if let Some(mins) = self.config.sync.background_interval_minutes {
                 if mins > 0 {
                     let every = Duration::from_secs(mins.saturating_mul(60));
                     if now.duration_since(self.last_auto_sync) >= every {
                         self.last_auto_sync = now;
+                        self.last_revision_check = now;
                         self.queue(PendingAction::BackgroundSync);
                     }
                 }
+            }
+            if let Some(secs) = self.config.sync.revision_poll_seconds {
+                if secs > 0
+                    && self.pending.is_none()
+                    && matches!(self.overlay, Overlay::None)
+                    && now.duration_since(self.last_revision_check)
+                        >= Duration::from_secs(secs.max(10))
+                {
+                    self.last_revision_check = now;
+                    self.queue(PendingAction::RevisionCheck);
+                }
+            }
+        }
+    }
+
+    /// Reset UI after the session logged itself out (timeout / system lock).
+    fn finish_forced_logout(&mut self, reason: &str) {
+        // Session already cleared tokens + persisted auth in `logout()`.
+        self.sign_out_current_profile();
+        self.set_sticky_status(reason);
+    }
+
+    /// Start the system sleep / screen-lock watcher once any profile asks for it, and
+    /// apply the timeout action when it fires.
+    fn poll_system_lock(&mut self) {
+        if self.using_mock {
+            return;
+        }
+        let wanted = self.profiles.profiles.iter().any(|p| p.lock_on_system_lock);
+        if !wanted {
+            // Stop the helper when no profile needs it any more.
+            self.system_lock = None;
+            self.system_lock_probed = false;
+            return;
+        }
+        if !self.system_lock_probed {
+            self.system_lock_probed = true;
+            self.system_lock = SystemLockMonitor::start();
+        }
+        let Some(event) = self.system_lock.as_ref().and_then(|m| m.poll()) else {
+            return;
+        };
+        self.handle_system_lock(event);
+    }
+
+    /// Apply the timeout action to every profile with "lock on system lock" enabled.
+    pub fn handle_system_lock(&mut self, event: SystemLockEvent) {
+        let reason = match event {
+            SystemLockEvent::ScreenLocked => "Locked: screen locked",
+            SystemLockEvent::Sleep => "Locked: system sleep",
+        };
+
+        // Background (parked) sessions.
+        let ids: Vec<String> = self.background_sessions.keys().cloned().collect();
+        for id in ids {
+            let enabled = self
+                .profiles
+                .get(&id)
+                .is_some_and(|p| p.lock_on_system_lock);
+            if !enabled {
+                continue;
+            }
+            if let Some(session) = self.background_sessions.get_mut(&id) {
+                if session.status() == SessionStatus::Unlocked {
+                    session.apply_timeout_action();
+                }
+            }
+        }
+        self.background_sessions
+            .retain(|_, s| s.status() != SessionStatus::LoggedOut);
+
+        // Active session.
+        let active_enabled = self
+            .profiles
+            .get(&self.active_profile_id)
+            .is_some_and(|p| p.lock_on_system_lock);
+        if !active_enabled || self.screen != Screen::Vault {
+            return;
+        }
+        let action = self
+            .session
+            .as_ref()
+            .map(|s| s.effective_timeout_action())
+            .unwrap_or_else(|| {
+                self.profiles
+                    .get(&self.active_profile_id)
+                    .map(|p| p.timeout_action)
+                    .unwrap_or_default()
+            });
+        match action {
+            TimeoutAction::Lock => {
+                self.lock();
+                self.set_sticky_status(reason);
+            }
+            TimeoutAction::Logout => {
+                self.finish_forced_logout(&reason.replace("Locked", "Logged out"));
             }
         }
     }
@@ -3770,6 +4615,10 @@ impl App {
                 self.close_overlay();
                 self.open_move_to_folder();
             }
+            Action::ShareToOrg => {
+                self.close_overlay();
+                self.open_share_to_org();
+            }
             Action::DeleteItem => {
                 self.close_overlay();
                 self.open_delete_confirm();
@@ -3787,6 +4636,10 @@ impl App {
             Action::OpenCommandPalette => {}
             Action::CloneItem => self.queue(PendingAction::CloneItem),
             Action::SignOutProfile => self.sign_out_current_profile(),
+            Action::ReceiveSend => {
+                self.close_overlay();
+                self.open_receive_send();
+            }
             _ => self.set_status(format!("Use keyboard shortcut for `{}`", action.label())),
         }
         self.touch();
@@ -3802,11 +4655,15 @@ impl App {
     }
 
     pub fn open_health_report(&mut self) {
+        let report = Box::new(self.health_report());
         self.overlay = Overlay::HealthReport {
             scroll: 0,
             hibp_opt_in: false,
             hibp_busy: false,
             hibp_results: Vec::new(),
+            hibp_email_opt_in: false,
+            hibp_email_results: Vec::new(),
+            report,
         };
         self.touch();
     }
@@ -3828,6 +4685,97 @@ impl App {
             self.queue(PendingAction::HibpScan);
         } else if let Overlay::HealthReport { hibp_results, .. } = &mut self.overlay {
             hibp_results.clear();
+        }
+    }
+
+    pub fn toggle_hibp_email_opt_in(&mut self) {
+        let Overlay::HealthReport {
+            hibp_email_opt_in,
+            hibp_busy,
+            hibp_email_results,
+            ..
+        } = &mut self.overlay
+        else {
+            return;
+        };
+        if *hibp_busy {
+            return;
+        }
+        if *hibp_email_opt_in {
+            *hibp_email_opt_in = false;
+            hibp_email_results.clear();
+            return;
+        }
+        if vault_session::hibp_api_key_from_env().is_none() {
+            self.set_status("Email breach check needs a HIBP API key: set BW_TUI_HIBP_API_KEY");
+            return;
+        }
+        *hibp_email_opt_in = true;
+        self.queue(PendingAction::HibpEmailScan);
+    }
+
+    pub async fn run_hibp_email_scan(&mut self) {
+        let run = matches!(
+            &self.overlay,
+            Overlay::HealthReport {
+                hibp_email_opt_in: true,
+                ..
+            }
+        );
+        let Some(api_key) = vault_session::hibp_api_key_from_env().filter(|_| run) else {
+            return;
+        };
+        if let Overlay::HealthReport {
+            hibp_busy,
+            hibp_email_results,
+            ..
+        } = &mut self.overlay
+        {
+            *hibp_busy = true;
+            hibp_email_results.clear();
+        }
+
+        // HIBP rate-limits breached-account lookups; keep the batch small and paced.
+        let emails = vault_session::collect_breach_check_emails(&self.report_items(), 10);
+        let mut results = Vec::new();
+        for (i, email) in emails.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(1600)).await;
+            }
+            match vault_session::hibp_email_breaches(email, &api_key).await {
+                Ok(breaches) => results.push(HibpResultLine {
+                    label: if breaches.is_empty() {
+                        email.clone()
+                    } else {
+                        format!("{email} ({})", breaches.join(", "))
+                    },
+                    count: breaches.len() as u64,
+                }),
+                Err(e) => {
+                    let fatal = matches!(
+                        e,
+                        vault_session::HibpError::Unauthorized
+                            | vault_session::HibpError::RateLimited
+                    );
+                    results.push(HibpResultLine {
+                        label: format!("{email}: {e}"),
+                        count: 0,
+                    });
+                    if fatal {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Overlay::HealthReport {
+            hibp_busy,
+            hibp_email_results,
+            ..
+        } = &mut self.overlay
+        {
+            *hibp_email_results = results;
+            *hibp_busy = false;
         }
     }
 
@@ -3910,7 +4858,10 @@ impl App {
         let agent_hint = self
             .session
             .as_ref()
-            .and_then(|s| s.ssh_agent_socket().map(|p| format!("SSH agent: {}", p.display())))
+            .and_then(|s| {
+                s.ssh_agent_socket()
+                    .map(|p| format!("SSH agent: {}", p.display()))
+            })
             .unwrap_or_else(|| "SSH agent: stopped".into());
         self.overlay = Overlay::AccountSettings {
             section: 0,
@@ -3920,6 +4871,14 @@ impl App {
     }
 
     pub fn open_pin_setup(&mut self) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.pin_unlock_blocked_by_policy())
+        {
+            self.set_status("Organization policy: PIN unlock is disabled");
+            return;
+        }
         self.overlay = Overlay::PinSetup {
             pin: String::new(),
             confirm: String::new(),
@@ -3998,9 +4957,30 @@ impl App {
             self.set_status("SSH agent stopped");
             return;
         }
-        match session.start_ssh_agent() {
+        if self.config.power.ssh_agent_confirm && !self.power.ssh_confirmed {
+            match session.ssh_agent_key_names() {
+                Ok(names) => {
+                    let prev = std::mem::replace(&mut self.overlay, Overlay::None);
+                    self.overlay = crate::app::ssh_confirm_overlay(
+                        prev,
+                        names,
+                        self.config.power.ssh_agent_confirm_each_use,
+                    );
+                }
+                Err(e) => {
+                    if let Overlay::AccountSettings { status, .. } = &mut self.overlay {
+                        *status = e.to_string();
+                    }
+                }
+            }
+            return;
+        }
+        match session.start_ssh_agent_opts(self.config.power.ssh_agent_confirm_each_use) {
             Ok(socket) => {
-                let msg = format!("SSH agent running — export SSH_AUTH_SOCK={}", socket.display());
+                let msg = format!(
+                    "SSH agent running — export SSH_AUTH_SOCK={}",
+                    socket.display()
+                );
                 if let Overlay::AccountSettings { status, .. } = &mut self.overlay {
                     *status = msg.clone();
                 }
@@ -4044,6 +5024,16 @@ impl App {
         if self.using_mock {
             if let Overlay::ChangeMasterPassword { error, .. } = &mut self.overlay {
                 *error = Some("Mock mode — use a real session".into());
+            }
+            return;
+        }
+        if let Some(Err(e)) = self
+            .session
+            .as_ref()
+            .map(|s| s.check_master_password_policy(&new))
+        {
+            if let Overlay::ChangeMasterPassword { error, .. } = &mut self.overlay {
+                *error = Some(e.to_string());
             }
             return;
         }
@@ -4091,11 +5081,13 @@ impl App {
             self.set_status("Organization policy disables Send");
             return;
         }
+        let mut form = crate::send_form::SendFormState::new(crate::send_form::SendKind::Text);
+        form.hide_email_blocked = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.send_policy().disable_hide_email == Some(true));
         self.overlay = Overlay::SendForm {
-            editing_id: None,
-            name: String::new(),
-            text: String::new(),
-            field: SendField::Name,
+            form: Box::new(form),
         };
         self.touch();
     }
@@ -4106,11 +5098,45 @@ impl App {
             return;
         };
         let send = &self.sends[idx];
+        let kind = if send.is_file {
+            crate::send_form::SendKind::File
+        } else {
+            crate::send_form::SendKind::Text
+        };
+        let mut form = crate::send_form::SendFormState::new(kind);
+        form.editing_id = Some(send.id.clone());
+        form.name = send.name.clone();
+        form.content = if send.is_file {
+            send.file_name.clone().unwrap_or_default()
+        } else {
+            send.text.clone().unwrap_or_default()
+        };
+        form.notes = send.notes.clone().unwrap_or_default();
+        form.max_access = send
+            .max_access_count
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        form.expiration = send
+            .expiration_date
+            .as_deref()
+            .map(crate::send_form::format_local_datetime)
+            .unwrap_or_default();
+        form.deletion = send
+            .deletion_date
+            .as_deref()
+            .map(crate::send_form::format_local_datetime)
+            .unwrap_or_default();
+        form.hide_email = send.hide_email;
+        form.hidden_text = send.text_hidden;
+        form.disabled = send.disabled;
+        form.has_password = send.has_password;
+        form.hide_email_blocked = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.send_policy().disable_hide_email == Some(true))
+            && !send.hide_email;
         self.overlay = Overlay::SendForm {
-            editing_id: Some(send.id.clone()),
-            name: send.name.clone(),
-            text: send.text.clone().unwrap_or_default(),
-            field: SendField::Name,
+            form: Box::new(form),
         };
         self.touch();
     }
@@ -4198,10 +5224,7 @@ impl App {
         }
         if let Some(session) = self.session.as_ref() {
             if let Ok(list) = session.list_attachments(&item.id) {
-                self.detail_attachments = list
-                    .into_iter()
-                    .map(|a| (a.id, a.file_name))
-                    .collect();
+                self.detail_attachments = list.into_iter().map(|a| (a.id, a.file_name)).collect();
             }
         }
     }
@@ -4211,7 +5234,7 @@ impl App {
             self.set_status("No item selected");
             return;
         };
-        if item.organization_id.is_some() || item.has_item_key {
+        if item.organization_id.is_some() {
             self.set_status("Cannot clone organization items");
             return;
         }
@@ -4224,10 +5247,17 @@ impl App {
             return;
         };
         self.busy = true;
+        let clone_warn = tui_item_for_report(&item)
+            .clone_warnings()
+            .into_iter()
+            .next();
         match session.clone_item(&id).await {
             Ok(_) => {
                 self.reload_from_session();
-                self.set_status("Item cloned");
+                match clone_warn {
+                    Some(w) => self.set_sticky_status(format!("Item cloned — {w}")),
+                    None => self.set_status("Item cloned"),
+                }
                 self.touch();
             }
             Err(e) => self.set_status(format!("Clone failed: {e}")),
@@ -4235,47 +5265,60 @@ impl App {
         self.busy = false;
     }
 
+    fn set_send_form_error(&mut self, msg: String) {
+        if let Overlay::SendForm { form } = &mut self.overlay {
+            form.error = Some(msg.clone());
+        }
+        self.set_status(msg);
+    }
+
     pub async fn submit_send_form(&mut self) {
-        let Overlay::SendForm {
-            editing_id,
-            name,
-            text,
-            ..
-        } = &self.overlay
-        else {
+        let Overlay::SendForm { form } = &self.overlay else {
             return;
         };
-        if name.trim().is_empty() || text.trim().is_empty() {
-            self.set_status("Send name and text are required");
+        let form = (**form).clone();
+        if let Err(e) = form.validate_required() {
+            self.set_send_form_error(e);
             return;
         }
-        if self.using_mock || self.session.is_none() {
-            self.set_status("Send requires an online session");
+        let opts = match form.to_options(chrono::Utc::now()) {
+            Ok(o) => o,
+            Err(e) => {
+                self.set_send_form_error(e);
+                return;
+            }
+        };
+        if self.using_mock || self.session.is_none() || self.session_is_offline() {
+            self.set_send_form_error("Send requires an online session".into());
             return;
         }
-        if self.session_is_offline() {
-            self.set_status("Send requires an online session");
-            return;
-        }
-        let name = name.clone();
-        let text = text.clone();
-        let is_edit = editing_id.is_some();
-        let editing_id = editing_id.clone();
+        use crate::send_form::SendKind;
+        let name = form.name.trim().to_string();
+        let is_edit = form.editing_id.is_some();
         self.busy = true;
-        let result = if let Some(id) = editing_id {
-            self.session
-                .as_mut()
-                .unwrap()
-                .update_text_send(&id, &name, &text)
-                .await
-        } else {
-            self.session
-                .as_mut()
-                .unwrap()
-                .create_text_send(&name, &text)
-                .await
-                .map(|_| ())
+        let result = {
+            let session = self.session.as_mut().unwrap();
+            match (&form.editing_id, form.kind) {
+                (Some(id), SendKind::Text) => {
+                    session
+                        .update_send(id, &name, Some(&form.content), &opts)
+                        .await
+                }
+                (Some(id), SendKind::File) => session.update_send(id, &name, None, &opts).await,
+                (None, SendKind::Text) => session
+                    .create_send(&name, &form.content, &opts)
+                    .await
+                    .map(|_| ()),
+                (None, SendKind::File) => {
+                    let path = expand_user_path(form.content.trim());
+                    session
+                        .create_file_send(&name, &path, &opts)
+                        .await
+                        .map(|_| ())
+                }
+            }
         };
+        self.busy = false;
         match result {
             Ok(()) => {
                 self.close_overlay();
@@ -4286,9 +5329,104 @@ impl App {
                     "Send created"
                 });
             }
-            Err(e) => self.set_status(format!("Send failed: {e}")),
+            Err(e) => self.set_send_form_error(format!("Send failed: {e}")),
         }
+    }
+
+    pub fn open_receive_send(&mut self) {
+        let dir = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".into());
+        self.overlay = Overlay::ReceiveSend {
+            state: Box::new(crate::send_form::ReceiveSendState::new(dir)),
+        };
+        self.touch();
+    }
+
+    /// Fetch the Send for the URL (and password) typed in the receive overlay.
+    pub async fn submit_receive_send(&mut self) {
+        let Overlay::ReceiveSend { state } = &mut self.overlay else {
+            return;
+        };
+        if state.received.is_some() {
+            return;
+        }
+        let url = state.url.trim().to_string();
+        if url.is_empty() {
+            state.message = Some("Paste a Send link".into());
+            return;
+        }
+        let password = state.password.clone();
+        self.busy = true;
+        let result =
+            vault_session::receive_send(&url, (!password.is_empty()).then_some(password.as_str()))
+                .await;
         self.busy = false;
+        if let Overlay::ReceiveSend { state } = &mut self.overlay {
+            match result {
+                Ok(r) => state.set_received(r),
+                Err(e) => state.set_error(&e),
+            }
+        }
+        self.touch();
+    }
+
+    /// Download the received file Send into the chosen directory or path.
+    pub async fn save_received_send_file(&mut self) {
+        let Overlay::ReceiveSend { state } = &self.overlay else {
+            return;
+        };
+        let Some(received) = state.received.clone() else {
+            return;
+        };
+        if !received.is_file() {
+            return;
+        }
+        let dest = expand_user_path(state.save_path.trim());
+        self.busy = true;
+        let result = vault_session::save_received_file(&received, &dest).await;
+        self.busy = false;
+        match result {
+            Ok(path) => {
+                let msg = format!("Saved {}", path.display());
+                if let Overlay::ReceiveSend { state } = &mut self.overlay {
+                    state.message = Some(msg.clone());
+                }
+                self.set_status(msg);
+            }
+            Err(e) => {
+                if let Overlay::ReceiveSend { state } = &mut self.overlay {
+                    state.message = Some(format!("Save failed: {e}"));
+                }
+            }
+        }
+        self.touch();
+    }
+
+    pub fn toggle_received_send_reveal(&mut self) {
+        if let Overlay::ReceiveSend { state } = &mut self.overlay {
+            state.reveal = !state.reveal;
+        }
+    }
+
+    pub fn copy_received_send_text(&mut self) {
+        let Overlay::ReceiveSend { state } = &self.overlay else {
+            return;
+        };
+        let Some(text) = state.received.as_ref().and_then(|r| r.text.clone()) else {
+            return;
+        };
+        let copied = match self.session.as_mut() {
+            Some(session) => session.copy_text(&text).is_ok(),
+            None => false,
+        };
+        if copied {
+            self.set_status("Send text copied");
+        } else if crate::osc52::try_copy_osc52(&text) {
+            self.set_status("Send text copied (OSC 52)");
+        } else {
+            self.set_status("Copy failed");
+        }
     }
 
     pub async fn submit_attachment_upload(&mut self) {
@@ -4401,10 +5539,22 @@ impl App {
             name,
             title,
             first_name,
+            middle_name,
             last_name,
             email,
             phone,
             username,
+            company,
+            address1,
+            address2,
+            address3,
+            city,
+            state,
+            postal_code,
+            country,
+            ssn,
+            passport,
+            license,
             notes,
             reprompt,
             ..
@@ -4420,22 +5570,22 @@ impl App {
             name: name.trim().to_string(),
             title: nonempty(title),
             first_name: nonempty(first_name),
-            middle_name: None,
+            middle_name: nonempty(middle_name),
             last_name: nonempty(last_name),
-            address1: None,
-            address2: None,
-            address3: None,
-            city: None,
-            state: None,
-            postal_code: None,
-            country: None,
-            company: None,
+            address1: nonempty(address1),
+            address2: nonempty(address2),
+            address3: nonempty(address3),
+            city: nonempty(city),
+            state: nonempty(state),
+            postal_code: nonempty(postal_code),
+            country: nonempty(country),
+            company: nonempty(company),
             email: nonempty(email),
             phone: nonempty(phone),
-            ssn: None,
+            ssn: nonempty(ssn),
             username: nonempty(username),
-            passport_number: None,
-            license_number: None,
+            passport_number: nonempty(passport),
+            license_number: nonempty(license),
             notes: nonempty(notes),
             folder_id: None,
             favorite: false,
@@ -4565,8 +5715,85 @@ impl App {
         self.busy = false;
     }
 
+    pub fn open_custom_fields_editor(&mut self) {
+        let Some(item) = self.selected_decrypted().cloned() else {
+            self.set_status("No item selected");
+            return;
+        };
+        if item.organization_id.is_some() && !self.item_editable_public(&item.id) {
+            self.set_status("Cannot edit organization item fields");
+            return;
+        }
+        self.overlay = Overlay::CustomFieldsForm {
+            item_id: item.id,
+            fields: item.custom_fields,
+            selected: 0,
+            editing: None,
+            edit_name: String::new(),
+            edit_value: String::new(),
+            edit_type: crate::models::CustomFieldKind::Text,
+            edit_focus: CustomFieldEditFocus::Name,
+        };
+        self.touch();
+    }
+
+    pub async fn submit_custom_fields(&mut self) {
+        let Overlay::CustomFieldsForm {
+            item_id, fields, ..
+        } = &self.overlay
+        else {
+            return;
+        };
+        let item_id = item_id.clone();
+        let session_fields: Vec<vault_session::DecryptedField> = fields
+            .iter()
+            .map(|f| vault_session::DecryptedField {
+                name: f.name.clone(),
+                value: f.value.clone(),
+                field_type: f.kind.to_session(),
+                linked_id: f.linked_id,
+            })
+            .collect();
+        if self.using_mock {
+            if let Some(item) = self.items.iter_mut().find(|i| i.id == item_id) {
+                item.custom_fields = fields.clone();
+            }
+            self.close_overlay();
+            self.set_status("Custom fields saved (mock)");
+            self.touch();
+            return;
+        }
+        if self.session_is_offline() {
+            self.set_status("Offline — save requires network");
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        self.busy = true;
+        match session
+            .update_custom_fields(&item_id, &session_fields)
+            .await
+        {
+            Ok(()) => {
+                self.reload_from_session();
+                self.close_overlay();
+                self.set_status("Custom fields updated");
+                self.touch();
+            }
+            Err(e) => self.set_status(format!("Custom fields failed: {e}")),
+        }
+        self.busy = false;
+    }
+
     pub fn health_report(&self) -> VaultHealthReport {
-        build_health_report(&self.report_items())
+        let opts = vault_session::HealthOptions {
+            two_factor_directory: Some(vault_session::TwoFactorDirectory::load(
+                &app_data_dir().join("2fa-directory.json"),
+            )),
+            ..Default::default()
+        };
+        vault_session::build_health_report_with(&self.report_items(), &opts)
     }
 
     fn report_items(&self) -> Vec<vault_session::DecryptedItem> {
@@ -4581,7 +5808,7 @@ impl App {
             self.set_status("No custom field at that slot");
             return;
         };
-        if field.hidden && !self.reveal_secrets {
+        if field.hidden() && !self.reveal_secrets {
             self.set_status("Reveal secrets to copy hidden fields");
             return;
         }
@@ -4692,6 +5919,7 @@ fn tui_item_for_report(item: &DecryptedItem) -> vault_session::DecryptedItem {
         ssh_private_key: item.ssh_private_key.clone(),
         ssh_public_key: item.ssh_public_key.clone(),
         ssh_fingerprint: item.ssh_fingerprint.clone(),
+        passkeys: item.passkeys.clone(),
         has_item_key: item.has_item_key,
     }
 }
@@ -4738,4 +5966,14 @@ impl Drop for App {
         }
         self.session = None;
     }
+}
+
+/// Expand a leading `~/` to the user's home directory.
+pub(crate) fn expand_user_path(raw: &str) -> std::path::PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(raw)
 }

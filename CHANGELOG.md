@@ -4,12 +4,25 @@
 
 ### Added
 
+- Feature-gap roadmap P0–P5: themes/keybinds, Sends+receive, zxcvbn/health/revision sync, multi-format import/export, timeout/sleep lock + org policies, org share/bulk, 2FA picker + account tools, power-user TUI (QR/editor/autotype/toasts/watchtower/domain rules), CLI unlock daemon / serve / CRUD / completions
+- Full Sends: file Sends (client-side encrypted upload via `POST /sends/file/v2`, direct + Azure upload types), password protection (PBKDF2-SHA256, 100k iterations, send key as salt), max access count, expiration/deletion dates (default deletion 7 days, max 31), hide email (respects org policy), disable, notes; TUI Send form + detail pane expanded; `Session::{create_send, create_file_send, update_send}`
+- Receive a Send: `POST /sends/access/{id}` (+ file download endpoint), decrypt with the URL-fragment key (HKDF salt `bitwarden-send`); TUI "Open Send link" overlay (`O` / palette) and CLI `receive <url>` (works without a saved session)
+
+## [0.1.0] - 2026-10-12
+
+### Added
+
+- Full Sends and receive (see Unreleased for continuing work)
 - Sync includes equivalent/global domains (no `excludeDomains`); stored on `Session` for URI matching
 - Org policies parsed on sync; generator clamping in TUI/CLI (`generate --apply-org-policy`); Send create blocked when disabled
 - TUI generator: password / passphrase / username modes, strength meter, `avoid_ambiguous`, min numbers/special
 - Health report opt-in HIBP counts (`h` in overlay; network only)
 - CLI `get --uri`; git-credential uses full URI + equivalent domains
-- Search operator `url:` / `uri:`; default background sync interval 5 minutes
+- Passkeys (FIDO2): `login.fido2Credentials` metadata (site, user, discoverable, created) shown in item detail; private key material is never decrypted; credentials are preserved verbatim on edit; clone warns that passkeys are not copied
+- Password strength via `zxcvbn` (score 0–4, warnings) in health report weak-password detection and the generator meter; `generate_password_min_score`
+- Health report: old passwords (>1 year), expired / expiring cards, inactive 2FA (built-in domain list + optional `2fa-directory.json` dataset in the data dir), opt-in HIBP email breach lookup (`BW_TUI_HIBP_API_KEY`)
+- Faster sync: `GET /accounts/revision-date` probe (`Session::sync_if_changed`); TUI polls it every `[sync] revision_poll_seconds` (default 60) and only full-syncs on change. SignalR push not implemented (documented)
+- Search operator `url: / `uri:`; default background sync interval 5 minutes
 
 ### Security
 

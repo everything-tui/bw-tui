@@ -2,7 +2,7 @@
 
 /// Application-level command. Key handlers should eventually emit these
 /// instead of mutating `App` inline; a single dispatcher executes them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action {
     Quit,
     ToggleHelp,
@@ -42,7 +42,9 @@ pub enum Action {
     OpenCommandPalette,
     CloneItem,
     MoveToFolder,
+    ShareToOrg,
     CopySendLink,
+    ReceiveSend,
 }
 
 impl Action {
@@ -74,7 +76,9 @@ impl Action {
             OpenCommandPalette,
             CloneItem,
             MoveToFolder,
+            ShareToOrg,
             CopySendLink,
+            ReceiveSend,
             SignOutProfile,
         ]
     }
@@ -119,7 +123,9 @@ impl Action {
             Self::OpenCommandPalette => "Command palette",
             Self::CloneItem => "Clone item",
             Self::MoveToFolder => "Move to folder",
+            Self::ShareToOrg => "Share to organization",
             Self::CopySendLink => "Copy Send link",
+            Self::ReceiveSend => "Open Send link",
         }
     }
 }

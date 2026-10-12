@@ -81,6 +81,17 @@ pub fn parse_ssh_key_item(item: &DecryptedItem) -> Result<ParsedSshKey> {
 /// Start a dedicated `ssh-agent` and load `keys` via `ssh-add`.
 #[cfg(unix)]
 pub fn start_agent_with_keys(data_dir: &Path, keys: &[ParsedSshKey]) -> Result<SshAgentHandle> {
+    start_agent_with_keys_opts(data_dir, keys, false)
+}
+
+/// Like [`start_agent_with_keys`]; with `confirm_each_use` keys are added with `ssh-add -c`
+/// so the agent asks (via `SSH_ASKPASS`) before every signature.
+#[cfg(unix)]
+pub fn start_agent_with_keys_opts(
+    data_dir: &Path,
+    keys: &[ParsedSshKey],
+    confirm_each_use: bool,
+) -> Result<SshAgentHandle> {
     if keys.is_empty() {
         return Err(SessionError::Other("no SSH keys to load".into()));
     }
@@ -131,13 +142,24 @@ pub fn start_agent_with_keys(data_dir: &Path, keys: &[ParsedSshKey]) -> Result<S
         ));
     }
 
-    add_keys_to_agent(&socket, keys, &key_dir)?;
+    add_keys_to_agent_opts(&socket, keys, &key_dir, confirm_each_use)?;
 
     Ok(SshAgentHandle {
         socket,
         agent_child,
         key_dir,
     })
+}
+
+#[cfg(not(unix))]
+pub fn start_agent_with_keys_opts(
+    _data_dir: &Path,
+    _keys: &[ParsedSshKey],
+    _confirm_each_use: bool,
+) -> Result<SshAgentHandle> {
+    Err(SessionError::Other(
+        "SSH agent integration is only supported on Unix".into(),
+    ))
 }
 
 #[cfg(not(unix))]
@@ -148,10 +170,16 @@ pub fn start_agent_with_keys(_data_dir: &Path, _keys: &[ParsedSshKey]) -> Result
 }
 
 /// Load private keys into an existing agent socket (writes restricted temp key files, `ssh-add`).
-pub fn add_keys_to_agent(
+pub fn add_keys_to_agent(socket: &Path, keys: &[ParsedSshKey], key_dir: &Path) -> Result<()> {
+    add_keys_to_agent_opts(socket, keys, key_dir, false)
+}
+
+/// [`add_keys_to_agent`] with optional per-use confirmation (`ssh-add -c`).
+pub fn add_keys_to_agent_opts(
     socket: &Path,
     keys: &[ParsedSshKey],
     key_dir: &Path,
+    confirm_each_use: bool,
 ) -> Result<()> {
     if keys.is_empty() {
         return Ok(());
@@ -166,8 +194,12 @@ pub fn add_keys_to_agent(
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| SessionError::Other(e.to_string()))?;
         }
-        let status = Command::new("ssh-add")
-            .env("SSH_AUTH_SOCK", socket)
+        let mut cmd = Command::new("ssh-add");
+        cmd.env("SSH_AUTH_SOCK", socket);
+        if confirm_each_use {
+            cmd.arg("-c");
+        }
+        let status = cmd
             .arg(&path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -187,16 +219,9 @@ pub fn add_keys_to_agent(
 
 /// Human-readable instructions when only key files are exported (no agent).
 pub fn ssh_add_instructions(socket: &Path, key_paths: &[PathBuf]) -> String {
-    let mut out = format!(
-        "export SSH_AUTH_SOCK={}\n",
-        shell_escape_path(socket)
-    );
+    let mut out = format!("export SSH_AUTH_SOCK={}\n", shell_escape_path(socket));
     for p in key_paths {
-        let _ = writeln!(
-            out,
-            "ssh-add {}",
-            shell_escape_path(p)
-        );
+        let _ = writeln!(out, "ssh-add {}", shell_escape_path(p));
     }
     out
 }
@@ -264,6 +289,7 @@ mod tests {
             ssh_private_key: None,
             ssh_public_key: None,
             ssh_fingerprint: None,
+            passkeys: Vec::new(),
             has_item_key: false,
         };
         assert!(parse_ssh_key_item(&item).is_err());

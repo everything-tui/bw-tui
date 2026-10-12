@@ -115,6 +115,9 @@ async fn mock_switch_back_keeps_vault_when_lock_on_switch_off() {
         auto_lock_minutes: Some(15),
         allow_plaintext_token: false,
         clipboard_clear_secs: 30,
+        timeout_action: vault_session::TimeoutAction::Lock,
+        timeout_on_startup: false,
+        lock_on_system_lock: false,
     });
 
     let default_id = app.active_profile_id.clone();
@@ -143,6 +146,9 @@ async fn mock_switch_away_does_not_restore_when_lock_on_switch_on() {
         auto_lock_minutes: Some(15),
         allow_plaintext_token: false,
         clipboard_clear_secs: 30,
+        timeout_action: vault_session::TimeoutAction::Lock,
+        timeout_on_startup: false,
+        lock_on_system_lock: false,
     });
 
     let default_id = app.active_profile_id.clone();

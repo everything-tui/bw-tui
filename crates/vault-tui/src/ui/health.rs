@@ -21,6 +21,10 @@ pub fn draw_health_report(frame: &mut Frame, app: &App) {
         hibp_opt_in,
         hibp_busy,
         hibp_results,
+        hibp_email_opt_in,
+        hibp_email_results,
+        report,
+        ..
     } = &app.overlay
     else {
         return;
@@ -31,10 +35,10 @@ pub fn draw_health_report(frame: &mut Frame, app: &App) {
 
     let hibp_hint = if *hibp_busy {
         "HIBP scan running…"
-    } else if *hibp_opt_in {
-        "HIBP on (h toggle off) — network"
+    } else if *hibp_opt_in || *hibp_email_opt_in {
+        "HIBP on (h pw · e email) — network"
     } else {
-        "h opt-in HIBP breach counts (network)"
+        "h opt-in HIBP pw · e email (network)"
     };
 
     let block = Block::default()
@@ -51,15 +55,17 @@ pub fn draw_health_report(frame: &mut Frame, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let report = app.health_report();
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             format!(
-                "Reused passwords: {} · Weak: {} · HTTP logins: {} · Duplicates: {}",
+                "Reused: {} · Weak: {} · Old: {} · HTTP: {} · Dupes: {} · Cards: {} · No 2FA: {}",
                 report.reused_passwords.len(),
                 report.weak_passwords.len(),
+                report.old_passwords.len(),
                 report.unsecured_http.len(),
                 report.duplicate_items.len(),
+                report.expired_cards.len(),
+                report.inactive_2fa.len(),
             ),
             Style::default().fg(FG).add_modifier(Modifier::BOLD),
         )),
@@ -75,8 +81,14 @@ pub fn draw_health_report(frame: &mut Frame, app: &App) {
     for weak in report.weak_passwords.iter().take(5) {
         lines.push(Line::from(Span::styled(
             format!(
-                "Weak ({} bits): {}",
-                weak.entropy_bits as u32, weak.item_name
+                "Weak ({}, ~{} bits{}): {}",
+                weak.strength_label,
+                weak.entropy_bits as u32,
+                weak.warning
+                    .as_deref()
+                    .map(|w| format!(" — {w}"))
+                    .unwrap_or_default(),
+                weak.item_name
             ),
             Style::default().fg(WARN),
         )));
@@ -86,6 +98,57 @@ pub fn draw_health_report(frame: &mut Frame, app: &App) {
             format!("HTTP: {} — {}", http.item_name, http.uri),
             Style::default().fg(WARN),
         )));
+    }
+    for card in report.expired_cards.iter().take(5) {
+        let label = if card.expired { "Expired" } else { "Expiring" };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{label} card: {} ({}/{})",
+                card.item_name, card.exp_month, card.exp_year
+            ),
+            Style::default().fg(WARN),
+        )));
+    }
+
+    for old in report.old_passwords.iter().take(5) {
+        lines.push(Line::from(Span::styled(
+            format!("Old password ({}d): {}", old.age_days, old.item_name),
+            Style::default().fg(WARN),
+        )));
+    }
+    for entry in report.inactive_2fa.iter().take(5) {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "2FA available, not set up: {} ({})",
+                entry.item_name, entry.host
+            ),
+            Style::default().fg(WARN),
+        )));
+    }
+
+    if *hibp_email_opt_in {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "HIBP email breaches (usernames that look like emails):",
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+        )));
+        if hibp_email_results.is_empty() && !*hibp_busy {
+            lines.push(Line::from(Span::styled(
+                "No emails to check.",
+                Style::default().fg(MUTED),
+            )));
+        }
+        for row in hibp_email_results.iter().take(8) {
+            let style = if row.count > 0 {
+                Style::default().fg(WARN)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{} — {} breaches", row.label, row.count),
+                style,
+            )));
+        }
     }
 
     if *hibp_opt_in {

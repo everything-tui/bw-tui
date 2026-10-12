@@ -26,6 +26,8 @@ pub enum SessionError {
     Clipboard(String),
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),
+    #[error("organization policy: {0}")]
+    PolicyViolation(String),
     #[error("{0}")]
     Other(String),
 }

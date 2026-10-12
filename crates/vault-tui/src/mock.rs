@@ -1,11 +1,42 @@
 //! Sample decrypted vault data for the TUI `--mock` demo.
 
-use vault_session::DecryptedUri;
+use vault_session::{CollectionChoice, DecryptedUri, OrgCollectionGroup};
 
 use crate::models::{DecryptedItem, FolderView, ItemType};
 
+/// Mock organizations/collections for the share-to-org wizard.
+pub fn sample_share_targets() -> Vec<OrgCollectionGroup> {
+    vec![OrgCollectionGroup {
+        organization_id: "44444444-4444-4444-4444-444444444444".into(),
+        organization_name: "Demo Organization".into(),
+        collections: vec![
+            CollectionChoice {
+                id: "55555555-5555-5555-5555-555555555555".into(),
+                name: "Shared".into(),
+                organization_id: "44444444-4444-4444-4444-444444444444".into(),
+                organization_name: "Demo Organization".into(),
+                read_only: false,
+                hide_passwords: false,
+                selected: false,
+            },
+            CollectionChoice {
+                id: "66666666-6666-6666-6666-666666666666".into(),
+                name: "Team logins".into(),
+                organization_id: "44444444-4444-4444-4444-444444444444".into(),
+                organization_name: "Demo Organization".into(),
+                read_only: false,
+                hide_passwords: false,
+                selected: false,
+            },
+        ],
+    }]
+}
+
 /// Recount folder item totals for the mock vault.
-pub fn with_folder_counts(mut folders: Vec<FolderView>, items: &[DecryptedItem]) -> Vec<FolderView> {
+pub fn with_folder_counts(
+    mut folders: Vec<FolderView>,
+    items: &[DecryptedItem],
+) -> Vec<FolderView> {
     for folder in folders.iter_mut() {
         let Some(id) = folder.id.as_ref() else {
             folder.count = 0;
@@ -40,12 +71,7 @@ pub fn sample_folders() -> Vec<FolderView> {
     ]
 }
 
-fn shell(
-    id: &str,
-    name: &str,
-    item_type: ItemType,
-    folder_id: Option<String>,
-) -> DecryptedItem {
+fn shell(id: &str, name: &str, item_type: ItemType, folder_id: Option<String>) -> DecryptedItem {
     DecryptedItem {
         id: id.into(),
         name: name.into(),
@@ -192,7 +218,8 @@ pub fn sample_items() -> Vec<DecryptedItem> {
     );
     ssh.ssh_public_key = Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoKey demo@host".into());
     ssh.ssh_fingerprint = Some("SHA256:demoFingerprint=======".into());
-    ssh.ssh_private_key = Some("-----BEGIN OPENSSH PRIVATE KEY-----\ndemo\n-----END OPENSSH PRIVATE KEY-----".into());
+    ssh.ssh_private_key =
+        Some("-----BEGIN OPENSSH PRIVATE KEY-----\ndemo\n-----END OPENSSH PRIVATE KEY-----".into());
 
     let mut trash = shell(
         "e5e5e5e5-e5e5-e5e5-e5e5-e5e5e5e5e5e5",

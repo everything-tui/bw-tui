@@ -1,23 +1,23 @@
 //! Bitwarden-compatible export / import (JSON, CSV, encrypted JSON).
 
-use base64::Engine;
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
 use argon2::{Algorithm, Argon2, Params, Version};
+use base64::Engine;
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256 as Sha256Digest;
 use vault_crypto::{
     decrypt_with_key, encrypt_with_key, stretch_master_key, KdfParams, MasterKey,
-    PBKDF2_MIN_ITERATIONS, SymmetricCryptoKey,
+    SymmetricCryptoKey, PBKDF2_MIN_ITERATIONS,
 };
 
 type HmacSha256 = Hmac<Sha256Digest>;
 
 use crate::error::{Result, SessionError};
 use crate::models::{
-    CardDraft, DecryptedFieldType, DecryptedFolder, DecryptedItem, IdentityDraft, ItemType,
-    LoginDraft, NoteDraft,
+    CardDraft, DecryptedCollection, DecryptedFieldType, DecryptedFolder, DecryptedItem,
+    IdentityDraft, ItemType, LoginDraft, NoteDraft,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ struct BitwardenExport {
     encrypted: bool,
     #[serde(default)]
     folders: Vec<ExportFolder>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    collections: Vec<ExportCollection>,
     #[serde(default)]
     items: Vec<ExportItem>,
 }
@@ -40,6 +42,15 @@ struct ExportFolder {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ExportCollection {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    organization_id: Option<String>,
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ExportItem {
     id: String,
     name: String,
@@ -47,6 +58,10 @@ struct ExportItem {
     item_type: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     folder_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    collection_ids: Option<Vec<String>>,
     favorite: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     notes: Option<String>,
@@ -293,6 +308,8 @@ fn item_to_export(item: &DecryptedItem) -> ExportItem {
         name: item.name.clone(),
         item_type: item.item_type.as_u8().unwrap_or(0),
         folder_id: item.folder_id.clone(),
+        organization_id: None,
+        collection_ids: None,
         favorite: item.favorite,
         notes: item.notes.clone(),
         login,
@@ -327,15 +344,261 @@ pub fn export_json(items: &[DecryptedItem], folders: &[DecryptedFolder]) -> Stri
                 name: f.name.clone(),
             })
             .collect(),
-        items: items.iter().filter(|i| !i.deleted).map(item_to_export).collect(),
+        collections: Vec::new(),
+        items: items
+            .iter()
+            .filter(|i| !i.deleted)
+            .map(item_to_export)
+            .collect(),
     };
     serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into())
+}
+
+/// Organization export (unencrypted Bitwarden JSON with `collections` + per-item `collectionIds`).
+///
+/// This is a local export: it serialises the organization's already-decrypted items from the
+/// session cache. It does not call the server-side `/organizations/{id}/export` endpoint (see
+/// [`organization_export_endpoint`]), which requires org-owner privileges and org-key crypto
+/// that this client does not implement yet.
+pub fn export_organization_json(
+    organization_id: &str,
+    items: &[DecryptedItem],
+    collections: &[DecryptedCollection],
+) -> String {
+    let org_collections: Vec<ExportCollection> = collections
+        .iter()
+        .filter(|c| c.organization_id.as_deref() == Some(organization_id))
+        .map(|c| ExportCollection {
+            id: c.id.clone(),
+            organization_id: Some(organization_id.to_string()),
+            name: c.name.clone(),
+        })
+        .collect();
+    let export_items = items
+        .iter()
+        .filter(|i| !i.deleted && i.organization_id.as_deref() == Some(organization_id))
+        .map(|i| {
+            let mut e = item_to_export(i);
+            e.folder_id = None;
+            e.organization_id = Some(organization_id.to_string());
+            e.collection_ids = Some(i.collection_ids.clone());
+            e
+        })
+        .collect();
+    let doc = BitwardenExport {
+        encrypted: false,
+        folders: Vec::new(),
+        collections: org_collections,
+        items: export_items,
+    };
+    serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into())
+}
+
+/// Server API path Bitwarden uses for organization exports (`GET`, org-owner only).
+///
+/// Stub: documented for future wiring; local export via [`export_organization_json`] /
+/// [`export_organization_csv`] is what the CLI uses today.
+pub fn organization_export_endpoint(organization_id: &str) -> String {
+    format!("/api/organizations/{organization_id}/export")
+}
+
+/// Organization export as Bitwarden's org CSV (leading `collections` column).
+pub fn export_organization_csv(
+    organization_id: &str,
+    items: &[DecryptedItem],
+    collections: &[DecryptedCollection],
+) -> String {
+    let org_items: Vec<&DecryptedItem> = items
+        .iter()
+        .filter(|i| !i.deleted && i.organization_id.as_deref() == Some(organization_id))
+        .collect();
+    csv_full_rows(&org_items, &[], Some(collections), false)
+}
+
+const BW_CSV_HEADERS: [&str; 11] = [
+    "folder",
+    "favorite",
+    "type",
+    "name",
+    "notes",
+    "fields",
+    "reprompt",
+    "login_uri",
+    "login_username",
+    "login_password",
+    "login_totp",
+];
+
+/// Extended columns (not in Bitwarden's own CSV) so card / identity items survive a round trip
+/// with this client. Bitwarden's importer ignores unknown columns.
+const EXTENDED_CSV_HEADERS: [&str; 24] = [
+    "card_cardholder_name",
+    "card_brand",
+    "card_number",
+    "card_exp_month",
+    "card_exp_year",
+    "card_code",
+    "identity_title",
+    "identity_first_name",
+    "identity_middle_name",
+    "identity_last_name",
+    "identity_address1",
+    "identity_address2",
+    "identity_address3",
+    "identity_city",
+    "identity_state",
+    "identity_postal_code",
+    "identity_country",
+    "identity_company",
+    "identity_email",
+    "identity_phone",
+    "identity_ssn",
+    "identity_username",
+    "identity_passport_number",
+    "identity_license_number",
+];
+
+/// Full Bitwarden CSV schema for the personal vault:
+/// `folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp`.
+///
+/// Login and secure-note items are exported as Bitwarden does. When `extended` is true,
+/// card and identity items are included too, with extra `card_*` / `identity_*` columns.
+pub fn export_csv_full(
+    items: &[DecryptedItem],
+    folders: &[DecryptedFolder],
+    extended: bool,
+) -> String {
+    let refs: Vec<&DecryptedItem> = items.iter().filter(|i| !i.deleted).collect();
+    csv_full_rows(&refs, folders, None, extended)
+}
+
+fn csv_full_rows(
+    items: &[&DecryptedItem],
+    folders: &[DecryptedFolder],
+    org_collections: Option<&[DecryptedCollection]>,
+    extended: bool,
+) -> String {
+    let mut headers: Vec<&str> = Vec::new();
+    if org_collections.is_some() {
+        headers.push("collections");
+    }
+    headers.extend(BW_CSV_HEADERS);
+    if extended {
+        headers.extend(EXTENDED_CSV_HEADERS);
+    }
+    let mut w = headers.join(",");
+    w.push('\n');
+
+    for item in items {
+        let type_str = match item.item_type {
+            ItemType::Login => "login",
+            ItemType::SecureNote => "note",
+            ItemType::Card if extended => "card",
+            ItemType::Identity if extended => "identity",
+            _ => continue,
+        };
+        let folder_name = item
+            .folder_id
+            .as_ref()
+            .and_then(|id| folders.iter().find(|f| &f.id == id))
+            .map(|f| f.name.as_str())
+            .unwrap_or("");
+        let fields = item
+            .custom_fields
+            .iter()
+            .map(|f| format!("{}: {}", f.name, f.value))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let uris = item
+            .uris
+            .iter()
+            .map(|u| u.uri.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let is_login = item.item_type == ItemType::Login;
+
+        let mut cols: Vec<String> = Vec::new();
+        if let Some(cols_src) = org_collections {
+            let names = item
+                .collection_ids
+                .iter()
+                .filter_map(|id| cols_src.iter().find(|c| &c.id == id))
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            cols.push(names);
+        }
+        cols.push(folder_name.to_string());
+        cols.push(if item.favorite { "1" } else { "" }.to_string());
+        cols.push(type_str.to_string());
+        cols.push(item.name.clone());
+        cols.push(item.notes.clone().unwrap_or_default());
+        cols.push(fields);
+        cols.push(if item.reprompt { "1" } else { "0" }.to_string());
+        cols.push(if is_login { uris } else { String::new() });
+        cols.push(if is_login {
+            item.username.clone().unwrap_or_default()
+        } else {
+            String::new()
+        });
+        cols.push(if is_login {
+            item.password.clone().unwrap_or_default()
+        } else {
+            String::new()
+        });
+        cols.push(if is_login {
+            item.totp.clone().unwrap_or_default()
+        } else {
+            String::new()
+        });
+        if extended {
+            let card = item.item_type == ItemType::Card;
+            let ident = item.item_type == ItemType::Identity;
+            let pick = |on: bool, v: &Option<String>| -> String {
+                if on {
+                    v.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            };
+            cols.push(pick(card, &item.cardholder_name));
+            cols.push(pick(card, &item.card_brand));
+            cols.push(pick(card, &item.card_number));
+            cols.push(pick(card, &item.card_exp_month));
+            cols.push(pick(card, &item.card_exp_year));
+            cols.push(pick(card, &item.card_code));
+            cols.push(pick(ident, &item.identity_title));
+            cols.push(pick(ident, &item.identity_first_name));
+            cols.push(pick(ident, &item.identity_middle_name));
+            cols.push(pick(ident, &item.identity_last_name));
+            cols.push(pick(ident, &item.identity_address1));
+            cols.push(pick(ident, &item.identity_address2));
+            cols.push(pick(ident, &item.identity_address3));
+            cols.push(pick(ident, &item.identity_city));
+            cols.push(pick(ident, &item.identity_state));
+            cols.push(pick(ident, &item.identity_postal_code));
+            cols.push(pick(ident, &item.identity_country));
+            cols.push(pick(ident, &item.identity_company));
+            cols.push(pick(ident, &item.identity_email));
+            cols.push(pick(ident, &item.identity_phone));
+            cols.push(pick(ident, &item.identity_ssn));
+            cols.push(pick(ident, &item.identity_username));
+            cols.push(pick(ident, &item.identity_passport_number));
+            cols.push(pick(ident, &item.identity_license_number));
+        }
+        let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+        w.push_str(&csv_row(&refs));
+    }
+    w
 }
 
 /// CSV export (login-focused columns).
 pub fn export_csv(items: &[DecryptedItem]) -> String {
     let mut w = String::from("name,username,password,uri,notes,favorite\n");
-    for item in items.iter().filter(|i| !i.deleted && i.item_type == ItemType::Login) {
+    for item in items
+        .iter()
+        .filter(|i| !i.deleted && i.item_type == ItemType::Login)
+    {
         let uri = item.primary_uri().unwrap_or("");
         w.push_str(&csv_row(&[
             &item.name,
@@ -372,7 +635,8 @@ pub fn export_encrypted_json(
     password: &str,
     kdf: &KdfParams,
 ) -> Result<String> {
-    kdf.validate().map_err(|e| SessionError::Other(e.to_string()))?;
+    kdf.validate()
+        .map_err(|e| SessionError::Other(e.to_string()))?;
     let plaintext = export_json(items, folders);
 
     let mut salt = [0u8; 16];
@@ -408,11 +672,7 @@ pub fn export_encrypted_json(
 }
 
 /// Export KDF uses the random file salt (not account email).
-fn derive_export_master_key(
-    password: &str,
-    kdf: &KdfParams,
-    salt: &[u8],
-) -> Result<MasterKey> {
+fn derive_export_master_key(password: &str, kdf: &KdfParams, salt: &[u8]) -> Result<MasterKey> {
     let mut key = [0u8; 32];
     match kdf {
         KdfParams::Pbkdf2 { iterations } => {
@@ -448,6 +708,23 @@ pub struct ImportBundle {
     pub note_drafts: Vec<NoteDraft>,
     pub card_drafts: Vec<CardDraft>,
     pub identity_drafts: Vec<IdentityDraft>,
+    /// Non-fatal notes from the importer (skipped items, unsupported fields, …).
+    pub warnings: Vec<String>,
+}
+
+impl ImportBundle {
+    /// Number of vault items (excluding folders) in the bundle.
+    pub fn item_count(&self) -> usize {
+        self.login_drafts.len()
+            + self.note_drafts.len()
+            + self.card_drafts.len()
+            + self.identity_drafts.len()
+    }
+
+    /// Whether the bundle holds neither folders nor items.
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty() && self.item_count() == 0
+    }
 }
 
 /// Decrypt a password-protected export produced by [`export_encrypted_json`], then parse.
@@ -478,9 +755,8 @@ pub fn import_encrypted_json(json: &str, password: &str) -> Result<ImportBundle>
     let master = derive_export_master_key(password, &kdf, &salt)?;
     let stretched = stretch_master_key(&master)?;
     let sym: SymmetricCryptoKey = (&stretched).into();
-    let validation = decrypt_with_key(&doc.enc_key_validation_do_not_edit, &sym).map_err(|_| {
-        SessionError::Other("incorrect export password (validation failed)".into())
-    })?;
+    let validation = decrypt_with_key(&doc.enc_key_validation_do_not_edit, &sym)
+        .map_err(|_| SessionError::Other("incorrect export password (validation failed)".into()))?;
     if validation != "bitwarden-export-check" {
         return Err(SessionError::Other(
             "incorrect export password (validation mismatch)".into(),
@@ -501,8 +777,8 @@ pub fn import_bitwarden_json(json: &str) -> Result<ImportBundle> {
             ));
         }
     }
-    let doc: BitwardenExport =
-        serde_json::from_str(json).map_err(|e| SessionError::Other(format!("import parse: {e}")))?;
+    let doc: BitwardenExport = serde_json::from_str(json)
+        .map_err(|e| SessionError::Other(format!("import parse: {e}")))?;
     if doc.encrypted {
         return Err(SessionError::Other(
             "encrypted export requires a password — use import_encrypted_json".into(),
@@ -613,6 +889,7 @@ pub fn import_bitwarden_json(json: &str) -> Result<ImportBundle> {
         note_drafts,
         card_drafts,
         identity_drafts,
+        warnings: Vec::new(),
     })
 }
 
@@ -635,9 +912,7 @@ impl DefaultLogin for Option<ExportLogin> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
-        DecryptedField, DecryptedPasswordHistory, DecryptedUri, ItemType,
-    };
+    use crate::models::{DecryptedField, DecryptedPasswordHistory, DecryptedUri, ItemType};
 
     fn sample_item() -> DecryptedItem {
         DecryptedItem {
@@ -698,6 +973,7 @@ mod tests {
             ssh_public_key: None,
             ssh_fingerprint: None,
             revision_date: None,
+            passkeys: Vec::new(),
             has_item_key: false,
         }
     }
@@ -764,9 +1040,6 @@ mod tests {
         assert_eq!(bundle.card_drafts.len(), 1);
         assert_eq!(bundle.card_drafts[0].number.as_deref(), Some("4111"));
         assert_eq!(bundle.identity_drafts.len(), 1);
-        assert_eq!(
-            bundle.identity_drafts[0].first_name.as_deref(),
-            Some("Ada")
-        );
+        assert_eq!(bundle.identity_drafts[0].first_name.as_deref(), Some("Ada"));
     }
 }

@@ -6,7 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DeleteTarget, EditField, NoteField, Overlay, uri_match_label};
+use crate::app::{
+    uri_match_label, App, DeleteTarget, EditField, NoteField, Overlay, ShareToOrgStep,
+};
 use crate::ui::form::draw_form_field;
 use crate::ui::layout::center_fixed;
 
@@ -18,6 +20,7 @@ const ERR: Color = Color::LightRed;
 pub fn draw_overlay(frame: &mut Frame, app: &App) {
     match &app.overlay {
         Overlay::None => {}
+        Overlay::Power(_) => super::power::draw_power_overlay(frame, app),
         Overlay::ItemForm { .. } => draw_item_form(frame, app),
         Overlay::NoteForm { .. } => draw_note_form(frame, app),
         Overlay::NewItemType { .. } => draw_new_item_type(frame, app),
@@ -30,7 +33,9 @@ pub fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::PasswordHistory => super::history::draw_password_history(frame, app),
         Overlay::HealthReport { .. } => super::health::draw_health_report(frame, app),
         Overlay::AccountSettings { .. } => super::account::draw_account_settings(frame, app),
+        Overlay::AccountTools(_) => super::account_tools::draw_account_tools(frame, app),
         Overlay::SendForm { .. } => super::account::draw_send_form(frame, app),
+        Overlay::ReceiveSend { .. } => super::account::draw_receive_send(frame, app),
         Overlay::CardForm { .. } => super::account::draw_card_form(frame, app),
         Overlay::PinSetup { .. } => super::account::draw_pin_setup(frame, app),
         Overlay::ChangeMasterPassword { .. } => {
@@ -40,7 +45,87 @@ pub fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::IdentityForm { .. } => draw_identity_form(frame, app),
         Overlay::SshKeyForm { .. } => draw_ssh_key_form(frame, app),
         Overlay::MoveToFolder { .. } => draw_move_to_folder(frame, app),
+        Overlay::ShareToOrg { .. } => draw_share_to_org(frame, app),
+        Overlay::CustomFieldsForm { .. } => draw_custom_fields_form(frame, app),
     }
+}
+
+fn draw_custom_fields_form(frame: &mut Frame, app: &App) {
+    let Overlay::CustomFieldsForm {
+        fields,
+        selected,
+        editing,
+        edit_name,
+        edit_value,
+        edit_type,
+        edit_focus,
+        ..
+    } = &app.overlay
+    else {
+        return;
+    };
+    let area = frame.area();
+    let popup = center_fixed(64, 18, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            " Custom fields ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " n new · d delete · Enter edit · Ctrl+s save · Esc ",
+            Style::default().fg(MUTED),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if editing.is_some() {
+        use crate::app::CustomFieldEditFocus;
+        let name_mark = if *edit_focus == CustomFieldEditFocus::Name {
+            ">"
+        } else {
+            " "
+        };
+        let val_mark = if *edit_focus == CustomFieldEditFocus::Value {
+            ">"
+        } else {
+            " "
+        };
+        let typ_mark = if *edit_focus == CustomFieldEditFocus::Type {
+            ">"
+        } else {
+            " "
+        };
+        lines.push(Line::from(format!("{name_mark} Name:  {edit_name}")));
+        lines.push(Line::from(format!("{val_mark} Value: {edit_value}")));
+        lines.push(Line::from(format!(
+            "{typ_mark} Type:  {} (Tab cycles)",
+            edit_type.label()
+        )));
+        lines.push(Line::from(Span::styled(
+            "Enter to apply field",
+            Style::default().fg(MUTED),
+        )));
+    } else if fields.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No custom fields — press n to add",
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for (i, f) in fields.iter().enumerate() {
+            let prefix = if i == *selected { "> " } else { "  " };
+            let hidden = if f.hidden() { " •••" } else { "" };
+            lines.push(Line::from(format!(
+                "{prefix}{} [{}]{hidden}",
+                f.name,
+                f.kind.label()
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn draw_attachment_path(frame: &mut Frame, app: &App) {
@@ -116,7 +201,14 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
         ])
         .split(inner);
 
-    draw_form_field(frame, rows[0], "Name", name, *field == EditField::Name, false);
+    draw_form_field(
+        frame,
+        rows[0],
+        "Name",
+        name,
+        *field == EditField::Name,
+        false,
+    );
     draw_form_field(
         frame,
         rows[1],
@@ -133,7 +225,14 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
         *field == EditField::Password,
         true,
     );
-    draw_form_field(frame, rows[3], "TOTP", totp, *field == EditField::Totp, true);
+    draw_form_field(
+        frame,
+        rows[3],
+        "TOTP",
+        totp,
+        *field == EditField::Totp,
+        true,
+    );
     let uri_idx = (*uri_line).min(uris.len().saturating_sub(1));
     let uri_active = *field == EditField::Uri;
     let uri_label = format!(
@@ -142,10 +241,7 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
         uris.len().max(1),
         uri_match_label(uris.get(uri_idx).map(|u| u.match_type).unwrap_or(0))
     );
-    let uri_text = uris
-        .get(uri_idx)
-        .map(|u| u.uri.as_str())
-        .unwrap_or("");
+    let uri_text = uris.get(uri_idx).map(|u| u.uri.as_str()).unwrap_or("");
     draw_form_field(frame, rows[4], &uri_label, uri_text, uri_active, false);
     draw_form_field(
         frame,
@@ -258,7 +354,7 @@ fn draw_new_item_type(frame: &mut Frame, app: &App) {
 
 fn draw_generator(frame: &mut Frame, app: &App) {
     use crate::app::{GeneratorMode, Overlay, UsernameKind};
-    use vault_session::{password_entropy_for_string, password_strength_label};
+    use vault_session::evaluate_password;
 
     let Overlay::Generator {
         mode,
@@ -329,12 +425,14 @@ fn draw_generator(frame: &mut Frame, app: &App) {
         rows[0],
     );
 
-    let strength = if *mode == GeneratorMode::Password && !preview.is_empty() {
-        let bits = password_entropy_for_string(preview);
+    let strength = if matches!(mode, GeneratorMode::Password | GeneratorMode::Passphrase)
+        && !preview.is_empty()
+    {
+        // zxcvbn: dictionary / pattern aware, not just charset size.
+        let s = evaluate_password(preview, &[]);
         format!(
-            "Strength: {} ({:.0} bits)",
-            password_strength_label(bits),
-            bits
+            "Strength: {} ({}/4, ~{:.0} bits)",
+            s.label, s.score, s.entropy_bits
         )
     } else {
         String::new()
@@ -358,6 +456,8 @@ fn draw_generator(frame: &mut Frame, app: &App) {
                 UsernameKind::Word => "word",
                 UsernameKind::Plus => "plus-address",
                 UsernameKind::Catchall => "catch-all",
+                UsernameKind::SimpleLogin => "SimpleLogin alias",
+                UsernameKind::AddyIo => "addy.io alias",
             }
         ),
         GeneratorMode::Password => format!(
@@ -427,12 +527,31 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App) {
         return;
     };
     let (title, prompt) = match target {
+        DeleteTarget::Item {
+            name,
+            permanent: true,
+            ..
+        } => (
+            " Permanently delete ",
+            format!("Permanently delete \"{name}\"? This cannot be undone."),
+        ),
         DeleteTarget::Item { name, .. } => (" Delete item ", format!("Move \"{name}\" to trash?")),
-        DeleteTarget::Folder { name, .. } => (" Delete folder ", format!("Delete folder \"{name}\"?")),
-        DeleteTarget::Send { name, .. } => (" Delete send ", format!("Delete send \"{name}\"?")),
-        DeleteTarget::Attachment { name, .. } => {
-            (" Delete attachment ", format!("Delete attachment \"{name}\"?"))
+        DeleteTarget::Folder { name, .. } => {
+            (" Delete folder ", format!("Delete folder \"{name}\"?"))
         }
+        DeleteTarget::Send { name, .. } => (" Delete send ", format!("Delete send \"{name}\"?")),
+        DeleteTarget::Attachment { name, .. } => (
+            " Delete attachment ",
+            format!("Delete attachment \"{name}\"?"),
+        ),
+        DeleteTarget::EmptyTrash { count } => (
+            " Empty trash ",
+            format!("Permanently delete {count} item(s) in trash?"),
+        ),
+        DeleteTarget::BulkItems { count, .. } => (
+            " Delete items ",
+            format!("Move {count} marked item(s) to trash?"),
+        ),
     };
 
     let area = frame.area();
@@ -470,9 +589,7 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App) {
 
 fn draw_reprompt(frame: &mut Frame, app: &App) {
     let Overlay::Reprompt {
-        password,
-        error,
-        ..
+        password, error, ..
     } = &app.overlay
     else {
         return;
@@ -513,10 +630,22 @@ fn draw_identity_form(frame: &mut Frame, app: &App) {
         name,
         title,
         first_name,
+        middle_name,
         last_name,
         email,
         phone,
         username,
+        company,
+        address1,
+        address2,
+        address3,
+        city,
+        state,
+        postal_code,
+        country,
+        ssn,
+        passport,
+        license,
         notes,
         reprompt,
         field,
@@ -525,7 +654,7 @@ fn draw_identity_form(frame: &mut Frame, app: &App) {
         return;
     };
     let area = frame.area();
-    let popup = center_fixed(64, 22, area);
+    let popup = center_fixed(70, 24, area);
     frame.render_widget(Clear, popup);
     let title_hdr = if editing_id.is_some() {
         " Edit identity "
@@ -540,54 +669,56 @@ fn draw_identity_form(frame: &mut Frame, app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " Tab · Ctrl+s save · Esc cancel ",
+            " Tab cycle fields · Ctrl+s save · Esc cancel ",
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+
+    // Show a window of fields around the focused one (compact scrolling form).
+    let entries: Vec<(&str, &str, IdentityField)> = vec![
+        ("Name", name.as_str(), IdentityField::Name),
+        ("Title", title.as_str(), IdentityField::Title),
+        ("First", first_name.as_str(), IdentityField::FirstName),
+        ("Middle", middle_name.as_str(), IdentityField::MiddleName),
+        ("Last", last_name.as_str(), IdentityField::LastName),
+        ("Email", email.as_str(), IdentityField::Email),
+        ("Phone", phone.as_str(), IdentityField::Phone),
+        ("Username", username.as_str(), IdentityField::Username),
+        ("Company", company.as_str(), IdentityField::Company),
+        ("Address1", address1.as_str(), IdentityField::Address1),
+        ("Address2", address2.as_str(), IdentityField::Address2),
+        ("Address3", address3.as_str(), IdentityField::Address3),
+        ("City", city.as_str(), IdentityField::City),
+        ("State", state.as_str(), IdentityField::State),
+        ("Postal", postal_code.as_str(), IdentityField::PostalCode),
+        ("Country", country.as_str(), IdentityField::Country),
+        ("SSN", ssn.as_str(), IdentityField::Ssn),
+        ("Passport", passport.as_str(), IdentityField::Passport),
+        ("License", license.as_str(), IdentityField::License),
+        ("Notes", notes.as_str(), IdentityField::Notes),
+    ];
+    let focus_idx = entries
+        .iter()
+        .position(|(_, _, f)| *f == *field)
+        .unwrap_or(0);
+    let window = 7usize;
+    let start = focus_idx
+        .saturating_sub(window / 2)
+        .min(entries.len().saturating_sub(window));
+    let end = (start + window).min(entries.len());
+    let visible = &entries[start..end];
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(2),
-        ])
+        .constraints(
+            std::iter::repeat_n(Constraint::Length(3), visible.len())
+                .chain(std::iter::once(Constraint::Length(2)))
+                .collect::<Vec<_>>(),
+        )
         .split(inner);
-    draw_form_field(frame, rows[0], "Name", name, *field == IdentityField::Name, false);
-    draw_form_field(frame, rows[1], "Title", title, *field == IdentityField::Title, false);
-    draw_form_field(
-        frame,
-        rows[2],
-        "First name",
-        first_name,
-        *field == IdentityField::FirstName,
-        false,
-    );
-    draw_form_field(
-        frame,
-        rows[3],
-        "Last name",
-        last_name,
-        *field == IdentityField::LastName,
-        false,
-    );
-    draw_form_field(frame, rows[4], "Email", email, *field == IdentityField::Email, false);
-    draw_form_field(frame, rows[5], "Phone", phone, *field == IdentityField::Phone, false);
-    draw_form_field(
-        frame,
-        rows[6],
-        "Username",
-        username,
-        *field == IdentityField::Username,
-        false,
-    );
-    draw_form_field(frame, rows[7], "Notes", notes, *field == IdentityField::Notes, false);
+    for (i, (label, value, f)) in visible.iter().enumerate() {
+        draw_form_field(frame, rows[i], label, value, *f == *field, false);
+    }
     let reprompt_label = format!("[{}] Require master password re-prompt", on(*reprompt));
     frame.render_widget(
         Paragraph::new(reprompt_label).style(if *field == IdentityField::Reprompt {
@@ -595,7 +726,7 @@ fn draw_identity_form(frame: &mut Frame, app: &App) {
         } else {
             Style::default().fg(MUTED)
         }),
-        rows[8],
+        rows[visible.len()],
     );
 }
 
@@ -629,7 +760,7 @@ fn draw_ssh_key_form(frame: &mut Frame, app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " Tab · Ctrl+s save · Esc cancel ",
+            " Tab · Ctrl+g gen Ed25519 · Ctrl+e notes in $EDITOR · Ctrl+s save · Esc ",
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);
@@ -644,7 +775,14 @@ fn draw_ssh_key_form(frame: &mut Frame, app: &App) {
             Constraint::Min(3),
         ])
         .split(inner);
-    draw_form_field(frame, rows[0], "Name", name, *field == SshKeyField::Name, false);
+    draw_form_field(
+        frame,
+        rows[0],
+        "Name",
+        name,
+        *field == SshKeyField::Name,
+        false,
+    );
     draw_form_field(
         frame,
         rows[1],
@@ -669,7 +807,14 @@ fn draw_ssh_key_form(frame: &mut Frame, app: &App) {
         *field == SshKeyField::Fingerprint,
         false,
     );
-    draw_form_field(frame, rows[4], "Notes", notes, *field == SshKeyField::Notes, false);
+    draw_form_field(
+        frame,
+        rows[4],
+        "Notes",
+        notes,
+        *field == SshKeyField::Notes,
+        false,
+    );
 }
 
 fn draw_move_to_folder(frame: &mut Frame, app: &App) {
@@ -720,3 +865,102 @@ fn draw_move_to_folder(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_share_to_org(frame: &mut Frame, app: &App) {
+    let Overlay::ShareToOrg {
+        item_ids,
+        groups,
+        org_index,
+        step,
+        collection_cursor,
+        selected_collections,
+    } = &app.overlay
+    else {
+        return;
+    };
+    let writable = app.share_writable_collections(*org_index);
+    let area = frame.area();
+    let height = match step {
+        ShareToOrgStep::PickOrganization => (groups.len() + 7).min(20) as u16,
+        ShareToOrgStep::PickCollections => (writable.len() + 8).min(22) as u16,
+    };
+    let popup = center_fixed(52, height.max(8), area);
+    frame.render_widget(Clear, popup);
+    let title = match step {
+        ShareToOrgStep::PickOrganization => {
+            format!(" Share to org · {} item(s) ", item_ids.len())
+        }
+        ShareToOrgStep::PickCollections => format!(
+            " Collections · {} ",
+            groups
+                .get(*org_index)
+                .map(|g| g.organization_name.as_str())
+                .unwrap_or("org")
+        ),
+    };
+    let hints = match step {
+        ShareToOrgStep::PickOrganization => " j/k · Enter next · Esc cancel ",
+        ShareToOrgStep::PickCollections => " j/k · Space toggle · Enter share · Esc back ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Span::styled(
+            title,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(hints, Style::default().fg(MUTED)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines: Vec<Line> = Vec::new();
+    match step {
+        ShareToOrgStep::PickOrganization => {
+            for (i, g) in groups.iter().enumerate() {
+                let marker = if i == *org_index { "› " } else { "  " };
+                let style = if i == *org_index {
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(FG)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{marker}{} ({} collections)",
+                        g.organization_name,
+                        g.collections.iter().filter(|c| c.writable()).count()
+                    ),
+                    style,
+                )));
+            }
+        }
+        ShareToOrgStep::PickCollections => {
+            for (i, (id, name)) in writable.iter().enumerate() {
+                let checked = if selected_collections.contains(id) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                let marker = if i == *collection_cursor {
+                    "› "
+                } else {
+                    "  "
+                };
+                let style = if i == *collection_cursor {
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(FG)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{marker}{checked} {name}"),
+                    style,
+                )));
+            }
+            if writable.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No writable collections",
+                    Style::default().fg(MUTED),
+                )));
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}

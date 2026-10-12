@@ -30,10 +30,7 @@ pub fn draw_password_history(frame: &mut Frame, app: &App) {
             title,
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Span::styled(
-            " Esc close ",
-            Style::default().fg(MUTED),
-        ));
+        .title_bottom(Span::styled(" Esc close ", Style::default().fg(MUTED)));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -58,10 +55,7 @@ pub fn draw_password_history(frame: &mut Frame, app: &App) {
 
     let mut lines = Vec::new();
     for (i, entry) in item.password_history.iter().enumerate() {
-        let when = entry
-            .last_used_date
-            .as_deref()
-            .unwrap_or("unknown date");
+        let when = entry.last_used_date.as_deref().unwrap_or("unknown date");
         let pw = if app.reveal_secrets {
             entry.password.as_str()
         } else {

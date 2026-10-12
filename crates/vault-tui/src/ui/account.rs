@@ -31,7 +31,7 @@ pub fn draw_account_settings(frame: &mut Frame, app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " h fingerprint · H hint · p password · i PIN · c clear PIN · s SSH agent · Esc ",
+            " h fp · H hint · p pw · i PIN · c clr · s ssh · a more · Esc ",
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);
@@ -39,36 +39,61 @@ pub fn draw_account_settings(frame: &mut Frame, app: &App) {
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("h", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "h",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Show fingerprint phrase", Style::default().fg(FG)),
         ]),
         Line::from(vec![
-            Span::styled("H", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "H",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Email master password hint", Style::default().fg(FG)),
         ]),
         Line::from(vec![
-            Span::styled("p", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "p",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Change master password", Style::default().fg(FG)),
         ]),
         Line::from(vec![
-            Span::styled("i", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "i",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Set / update PIN unlock", Style::default().fg(FG)),
         ]),
         Line::from(vec![
-            Span::styled("c", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "c",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Clear PIN unlock", Style::default().fg(FG)),
         ]),
         Line::from(vec![
-            Span::styled("s", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "s",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Start / stop vault SSH agent", Style::default().fg(FG)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "a",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Account tools (KDF, sessions, 2FA, devices, aliases)",
+                Style::default().fg(FG),
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(status.as_str(), Style::default().fg(MUTED))),
     ];
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Left),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
 }
 
 pub fn draw_pin_setup(frame: &mut Frame, app: &App) {
@@ -202,32 +227,206 @@ pub fn draw_change_master_password(frame: &mut Frame, app: &App) {
 }
 
 pub fn draw_send_form(frame: &mut Frame, app: &App) {
-    let Overlay::SendForm { name, text, field, .. } = &app.overlay else {
+    use crate::send_form::{SendFormField, SendKind};
+    let Overlay::SendForm { form } = &app.overlay else {
         return;
     };
     let area = frame.area();
-    let popup = center_fixed(52, 10, area);
+    let popup = center_fixed(64, 20, area);
+    frame.render_widget(Clear, popup);
+    let title = if form.editing_id.is_some() {
+        " Edit Send "
+    } else {
+        " New Send "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(title)
+        .title_bottom(Span::styled(
+            " Tab · Ctrl+t type · Ctrl+s save · Esc ",
+            Style::default().fg(MUTED),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let kind = match form.kind {
+        SendKind::Text => "Text",
+        SendKind::File => "File",
+    };
+    let content_label = match form.kind {
+        SendKind::Text => "Text",
+        SendKind::File => "File path",
+    };
+    let pw = if form.password.is_empty() {
+        if form.has_password {
+            if form.remove_password {
+                "(will remove)"
+            } else {
+                "(set · Space clears)"
+            }
+        } else {
+            ""
+        }
+    } else {
+        "••••••••"
+    };
+    let on = |b: bool| if b { "x" } else { " " };
+    let row = |label: &str, value: &str, active: bool| {
+        let style = if active {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default().fg(FG)
+        };
+        Line::from(Span::styled(format!("{label:<12} {value}"), style))
+    };
+    let lines = vec![
+        row("Type", kind, false),
+        row("Name", &form.name, form.field == SendFormField::Name),
+        row(
+            content_label,
+            &form.content,
+            form.field == SendFormField::Content,
+        ),
+        row("Notes", &form.notes, form.field == SendFormField::Notes),
+        row("Password", pw, form.field == SendFormField::Password),
+        row(
+            "Max access",
+            &form.max_access,
+            form.field == SendFormField::MaxAccess,
+        ),
+        row(
+            "Expires",
+            &form.expiration,
+            form.field == SendFormField::Expiration,
+        ),
+        row(
+            "Deletion",
+            &form.deletion,
+            form.field == SendFormField::Deletion,
+        ),
+        row(
+            "Hide email",
+            &format!("[{}]", on(form.hide_email)),
+            form.field == SendFormField::HideEmail,
+        ),
+        row(
+            "Hide text",
+            &format!("[{}]", on(form.hidden_text)),
+            form.field == SendFormField::HiddenText,
+        ),
+        row(
+            "Disabled",
+            &format!("[{}]", on(form.disabled)),
+            form.field == SendFormField::Disabled,
+        ),
+    ];
+    let mut out = lines;
+    if let Some(err) = &form.error {
+        out.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(ERR),
+        )));
+    }
+    frame.render_widget(Paragraph::new(out), inner);
+}
+
+pub fn draw_receive_send(frame: &mut Frame, app: &App) {
+    use crate::send_form::ReceiveField;
+    let Overlay::ReceiveSend { state } = &app.overlay else {
+        return;
+    };
+    let area = frame.area();
+    let popup = center_fixed(64, 16, area);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
-        .title(" New text send ")
-        .title_bottom(Span::styled(" Ctrl+s save · Esc cancel ", Style::default().fg(MUTED)));
+        .title(" Open Send link ")
+        .title_bottom(Span::styled(
+            " Enter fetch/save · c copy · r reveal · Esc ",
+            Style::default().fg(MUTED),
+        ));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(2), Constraint::Min(1)])
-        .split(inner);
-    let mk = |label: &str, val: &str, active: bool| {
-        Paragraph::new(format!("{label}: {val}")).style(if active {
-            Style::default().fg(ACCENT)
-        } else {
-            Style::default().fg(FG)
-        })
-    };
-    frame.render_widget(mk("Name", name, *field == crate::app::SendField::Name), rows[0]);
-    frame.render_widget(mk("Text", text, *field == crate::app::SendField::Text), rows[1]);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "{} URL: {}",
+                if state.field == ReceiveField::Url {
+                    ">"
+                } else {
+                    " "
+                },
+                state.url
+            ),
+            Style::default().fg(if state.field == ReceiveField::Url {
+                ACCENT
+            } else {
+                FG
+            }),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "{} Password: {}",
+                if state.field == ReceiveField::Password {
+                    ">"
+                } else {
+                    " "
+                },
+                if state.password.is_empty() {
+                    ""
+                } else {
+                    "••••"
+                }
+            ),
+            Style::default().fg(if state.field == ReceiveField::Password {
+                ACCENT
+            } else {
+                FG
+            }),
+        )),
+    ];
+    if let Some(r) = &state.received {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("Name: {}", r.name)));
+        if let Some(who) = r.creator_identifier.as_deref().filter(|s| !s.is_empty()) {
+            lines.push(Line::from(format!("From: {who}")));
+        }
+        if let Some(text) = &r.text {
+            let shown = if r.text_hidden && !state.reveal {
+                "•••••••• (r reveal)"
+            } else {
+                text.as_str()
+            };
+            lines.push(Line::from(format!("Text: {shown}")));
+        }
+        if let Some(f) = &r.file {
+            lines.push(Line::from(format!(
+                "File: {} ({})",
+                f.name,
+                f.size_name.as_deref().unwrap_or("?")
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} Save to: {}",
+                    if state.field == ReceiveField::SavePath {
+                        ">"
+                    } else {
+                        " "
+                    },
+                    state.save_path
+                ),
+                Style::default().fg(ACCENT),
+            )));
+        }
+    }
+    if let Some(msg) = &state.message {
+        lines.push(Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(MUTED),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 pub fn draw_card_form(frame: &mut Frame, app: &App) {
@@ -279,7 +478,14 @@ pub fn draw_card_form(frame: &mut Frame, app: &App) {
             Constraint::Length(2),
         ])
         .split(inner);
-    draw_form_field(frame, rows[0], "Name", name, *field == CardField::Name, false);
+    draw_form_field(
+        frame,
+        rows[0],
+        "Name",
+        name,
+        *field == CardField::Name,
+        false,
+    );
     draw_form_field(
         frame,
         rows[1],
@@ -288,8 +494,22 @@ pub fn draw_card_form(frame: &mut Frame, app: &App) {
         *field == CardField::Cardholder,
         false,
     );
-    draw_form_field(frame, rows[2], "Brand", brand, *field == CardField::Brand, false);
-    draw_form_field(frame, rows[3], "Number", number, *field == CardField::Number, true);
+    draw_form_field(
+        frame,
+        rows[2],
+        "Brand",
+        brand,
+        *field == CardField::Brand,
+        false,
+    );
+    draw_form_field(
+        frame,
+        rows[3],
+        "Number",
+        number,
+        *field == CardField::Number,
+        true,
+    );
     draw_form_field(
         frame,
         rows[4],
@@ -307,8 +527,18 @@ pub fn draw_card_form(frame: &mut Frame, app: &App) {
         false,
     );
     draw_form_field(frame, rows[6], "CVC", code, *field == CardField::Code, true);
-    draw_form_field(frame, rows[7], "Notes", notes, *field == CardField::Notes, false);
-    let reprompt_label = format!("[{}] Require master password re-prompt", if *reprompt { 'x' } else { ' ' });
+    draw_form_field(
+        frame,
+        rows[7],
+        "Notes",
+        notes,
+        *field == CardField::Notes,
+        false,
+    );
+    let reprompt_label = format!(
+        "[{}] Require master password re-prompt",
+        if *reprompt { 'x' } else { ' ' }
+    );
     frame.render_widget(
         Paragraph::new(reprompt_label).style(if *field == CardField::Reprompt {
             Style::default().fg(ACCENT)

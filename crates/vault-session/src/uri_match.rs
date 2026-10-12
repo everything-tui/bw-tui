@@ -69,9 +69,7 @@ pub fn item_matches_uri(
     let flat = flatten_equivalent(equivalent_domains);
     for (i, uri) in item_uris.iter().enumerate() {
         let mt = match_types.get(i).copied().flatten();
-        if uri_matches(uri.as_ref(), mt, target_url, &flat)
-            .unwrap_or(false)
-        {
+        if uri_matches(uri.as_ref(), mt, target_url, &flat).unwrap_or(false) {
             return true;
         }
     }
@@ -207,10 +205,20 @@ mod tests {
 
     #[test]
     fn regex_match_type() {
-        assert!(uri_matches(r"^https://example\.com/.*", Some(4), "https://example.com/a", &[])
-            .unwrap());
-        assert!(!uri_matches(r"^https://example\.com/.*", Some(4), "https://other.com/a", &[])
-            .unwrap());
+        assert!(uri_matches(
+            r"^https://example\.com/.*",
+            Some(4),
+            "https://example.com/a",
+            &[]
+        )
+        .unwrap());
+        assert!(!uri_matches(
+            r"^https://example\.com/.*",
+            Some(4),
+            "https://other.com/a",
+            &[]
+        )
+        .unwrap());
         assert!(!uri_matches("[invalid", Some(4), "https://example.com", &[]).unwrap());
     }
 }

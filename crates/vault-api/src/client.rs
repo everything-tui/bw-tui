@@ -3,8 +3,14 @@ use reqwest::Client;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::auth_models::is_new_device_verification_required;
 use crate::error::{ApiError, Result};
 use crate::models::*;
+
+mod auth_ext;
+
+mod org;
+pub use org::is_unsupported_route;
 
 const CLIENT_NAME: &str = "cli";
 const CLIENT_VERSION: &str = "2024.12.0";
@@ -134,6 +140,7 @@ pub struct VaultClient {
     config: ClientConfig,
     access_token: Option<String>,
     refresh_token: Option<String>,
+    new_device_otp: Option<String>,
 }
 
 impl VaultClient {
@@ -160,6 +167,7 @@ impl VaultClient {
             config,
             access_token: None,
             refresh_token: None,
+            new_device_otp: None,
         })
     }
 
@@ -257,6 +265,9 @@ impl VaultClient {
             form.push(("twoFactorProvider", "5".to_string()));
             form.push(("twoFactorToken", device.to_string()));
         }
+        if let Some(otp) = self.new_device_otp.as_deref() {
+            form.push(("newDeviceOtp", otp.to_string()));
+        }
 
         let resp = self
             .http
@@ -270,6 +281,9 @@ impl VaultClient {
         let body = resp.text().await?;
 
         if !status.is_success() {
+            if is_new_device_verification_required(&body) {
+                return Err(ApiError::NewDeviceVerificationRequired);
+            }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                 if v.get("TwoFactorProviders2").is_some() || v.get("TwoFactorProviders").is_some() {
                     return Err(ApiError::TwoFactorRequired {
@@ -517,6 +531,20 @@ impl VaultClient {
         self.register_finish(&req).await
     }
 
+    /// `GET /accounts/revision-date` — account revision timestamp in epoch milliseconds.
+    ///
+    /// Cheap change-detection probe: compare against the value stored after the last full
+    /// [`sync`](Self::sync) and skip the (large) `/sync` payload when unchanged.
+    pub async fn get_revision_date(&self) -> Result<i64> {
+        let resp = self
+            .http
+            .get(self.api("/accounts/revision-date"))
+            .header(AUTHORIZATION, self.bearer()?)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
     pub async fn sync(&self) -> Result<SyncResponse> {
         let resp = self
             .http
@@ -614,6 +642,38 @@ impl VaultClient {
         self.empty(resp).await
     }
 
+    /// `GET /settings/domains` — equivalent / global domain rules (raw JSON).
+    pub async fn get_domain_rules(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .get(self.api("/settings/domains"))
+            .header(AUTHORIZATION, self.bearer()?)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    /// `PUT /settings/domains` — replace custom equivalent domains and excluded global groups.
+    pub async fn put_domain_rules(&self, body: &serde_json::Value) -> Result<()> {
+        let resp = self
+            .http
+            .put(self.api("/settings/domains"))
+            .header(AUTHORIZATION, self.bearer()?)
+            .json(body)
+            .send()
+            .await?;
+        // Servers reply with the updated domains JSON (or empty); only the status matters.
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let message = resp.text().await.unwrap_or_default();
+        Err(ApiError::Api {
+            status: status.as_u16(),
+            message,
+        })
+    }
+
     pub async fn create_folder(&self, name: &str) -> Result<Folder> {
         let req = FolderRequest {
             name: name.to_string(),
@@ -665,9 +725,7 @@ impl VaultClient {
     pub async fn delete_attachment(&self, cipher_id: &str, attachment_id: &str) -> Result<()> {
         let resp = self
             .http
-            .delete(self.api(&format!(
-                "/ciphers/{cipher_id}/attachment/{attachment_id}"
-            )))
+            .delete(self.api(&format!("/ciphers/{cipher_id}/attachment/{attachment_id}")))
             .header(AUTHORIZATION, self.bearer()?)
             .send()
             .await?;
@@ -742,6 +800,121 @@ impl VaultClient {
             .send()
             .await?;
         self.empty(resp).await
+    }
+
+    /// Remove the password from an existing Send (`PUT /sends/{id}/remove-password`).
+    pub async fn remove_send_password(&self, id: &str) -> Result<SendResponse> {
+        let resp = self
+            .http
+            .put(self.api(&format!("/sends/{id}/remove-password")))
+            .header(AUTHORIZATION, self.bearer()?)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    /// Create a file Send record and obtain upload instructions (`POST /sends/file/v2`).
+    pub async fn create_file_send(&self, send: &SendRequest) -> Result<SendFileUploadDataResponse> {
+        let resp = self
+            .http
+            .post(self.api("/sends/file/v2"))
+            .header(AUTHORIZATION, self.bearer()?)
+            .json(send)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    /// Upload encrypted file bytes to the server (`FileUploadType::Direct`).
+    pub async fn upload_send_file_direct(
+        &self,
+        send_id: &str,
+        file_id: &str,
+        encrypted_name: &str,
+        encrypted_file: Vec<u8>,
+    ) -> Result<()> {
+        use reqwest::multipart::{Form, Part};
+
+        let part = Part::bytes(encrypted_file)
+            .file_name(encrypted_name.to_string())
+            .mime_str("application/octet-stream")
+            .map_err(|e| ApiError::Other(e.to_string()))?;
+        let form = Form::new().part("data", part);
+        let resp = self
+            .http
+            .post(self.api(&format!("/sends/{send_id}/file/{file_id}")))
+            .header(AUTHORIZATION, self.bearer()?)
+            .multipart(form)
+            .send()
+            .await?;
+        self.empty(resp).await
+    }
+
+    /// Upload encrypted file bytes to a pre-signed Azure blob URL (`FileUploadType::Azure`).
+    pub async fn upload_send_file_azure(&self, url: &str, encrypted_file: Vec<u8>) -> Result<()> {
+        let resp = self
+            .http
+            .put(url)
+            .header("x-ms-blob-type", "BlockBlob")
+            .header("x-ms-version", "2019-07-07")
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(encrypted_file)
+            .send()
+            .await?;
+        self.empty(resp).await
+    }
+
+    /// Public Send metadata (`POST /sends/access/{accessId}`). No authentication.
+    ///
+    /// `password_hash` is the base64 PBKDF2 hash (see `hash_send_password`), not plaintext.
+    pub async fn access_send(
+        &self,
+        access_id: &str,
+        password_hash: Option<&str>,
+    ) -> Result<SendAccessResponse> {
+        let body = SendAccessRequest {
+            password: password_hash.map(str::to_string),
+        };
+        let resp = self
+            .http
+            .post(self.api(&format!("/sends/access/{access_id}")))
+            .json(&body)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    /// Resolve a download URL for a file Send (`POST /sends/{sendId}/access/file/{fileId}`).
+    pub async fn access_send_file(
+        &self,
+        send_id: &str,
+        file_id: &str,
+        password_hash: Option<&str>,
+    ) -> Result<SendFileDownloadData> {
+        let body = SendAccessRequest {
+            password: password_hash.map(str::to_string),
+        };
+        let resp = self
+            .http
+            .post(self.api(&format!("/sends/{send_id}/access/file/{file_id}")))
+            .json(&body)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    /// Download raw bytes from a (pre-signed) URL without sending credentials.
+    pub async fn download_url_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 
     async fn json<T: serde::de::DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {

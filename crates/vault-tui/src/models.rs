@@ -7,7 +7,7 @@ use vault_session::{
     DecryptedPasswordHistory, ItemType as SessionItemType,
 };
 
-pub use vault_session::DecryptedUri;
+pub use vault_session::{DecryptedPasskey, DecryptedUri};
 
 /// Cipher type for display / filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,12 +55,68 @@ impl ItemType {
     }
 }
 
+/// Custom field type matching Bitwarden field types 0–3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CustomFieldKind {
+    #[default]
+    Text,
+    Hidden,
+    Boolean,
+    Linked,
+}
+
+impl CustomFieldKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "Text",
+            Self::Hidden => "Hidden",
+            Self::Boolean => "Boolean",
+            Self::Linked => "Linked",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Text => Self::Hidden,
+            Self::Hidden => Self::Boolean,
+            Self::Boolean => Self::Linked,
+            Self::Linked => Self::Text,
+        }
+    }
+
+    pub fn from_session(t: DecryptedFieldType) -> Self {
+        match t {
+            DecryptedFieldType::Text => Self::Text,
+            DecryptedFieldType::Hidden => Self::Hidden,
+            DecryptedFieldType::Boolean => Self::Boolean,
+            DecryptedFieldType::Linked => Self::Linked,
+            DecryptedFieldType::Unknown(_) => Self::Text,
+        }
+    }
+
+    pub fn to_session(self) -> DecryptedFieldType {
+        match self {
+            Self::Text => DecryptedFieldType::Text,
+            Self::Hidden => DecryptedFieldType::Hidden,
+            Self::Boolean => DecryptedFieldType::Boolean,
+            Self::Linked => DecryptedFieldType::Linked,
+        }
+    }
+}
+
 /// Custom field row for detail view / copy shortcuts.
 #[derive(Debug, Clone)]
 pub struct CustomFieldView {
     pub name: String,
     pub value: String,
-    pub hidden: bool,
+    pub kind: CustomFieldKind,
+    pub linked_id: Option<u32>,
+}
+
+impl CustomFieldView {
+    pub fn hidden(&self) -> bool {
+        matches!(self.kind, CustomFieldKind::Hidden)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +174,7 @@ pub struct DecryptedItem {
     pub reprompt: bool,
     pub custom_fields: Vec<CustomFieldView>,
     pub password_history: Vec<PasswordHistoryView>,
+    pub passkeys: Vec<DecryptedPasskey>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +184,16 @@ pub struct SendView {
     pub text: Option<String>,
     pub notes: Option<String>,
     pub disabled: bool,
+    pub is_file: bool,
+    pub file_name: Option<String>,
+    pub file_size_name: Option<String>,
+    pub has_password: bool,
+    pub max_access_count: Option<u32>,
+    pub access_count: u32,
+    pub expiration_date: Option<String>,
+    pub deletion_date: Option<String>,
+    pub hide_email: bool,
+    pub text_hidden: bool,
 }
 
 impl Default for DecryptedItem {
@@ -178,6 +245,7 @@ impl Default for DecryptedItem {
             reprompt: false,
             custom_fields: Vec::new(),
             password_history: Vec::new(),
+            passkeys: Vec::new(),
         }
     }
 }
@@ -186,7 +254,8 @@ fn field_from_session(f: &DecryptedField) -> CustomFieldView {
     CustomFieldView {
         name: f.name.clone(),
         value: f.value.clone(),
-        hidden: matches!(f.field_type, DecryptedFieldType::Hidden),
+        kind: CustomFieldKind::from_session(f.field_type),
+        linked_id: f.linked_id,
     }
 }
 
@@ -242,6 +311,7 @@ impl DecryptedItem {
             ssh_public_key: item.ssh_public_key.clone(),
             ssh_fingerprint: item.ssh_fingerprint.clone(),
             creation_date: item.creation_date.clone(),
+            passkeys: item.passkeys.clone(),
             has_item_key: item.has_item_key,
             reprompt: item.reprompt,
             custom_fields: item.custom_fields.iter().map(field_from_session).collect(),
@@ -370,9 +440,7 @@ impl FilterKind {
             Self::Organization(id) => {
                 !item.deleted && item.organization_id.as_deref() == Some(id.as_str())
             }
-            Self::Collection(id) => {
-                !item.deleted && item.collection_ids.iter().any(|c| c == id)
-            }
+            Self::Collection(id) => !item.deleted && item.collection_ids.iter().any(|c| c == id),
             Self::Sends => false,
         }
     }

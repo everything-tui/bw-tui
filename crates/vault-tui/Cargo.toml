@@ -3,6 +3,7 @@ name = "vault-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Terminal UI for Vaultwarden"
 default-run = "bitwarden-tui"
 
@@ -18,13 +19,32 @@ crossterm.workspace = true
 fuzzy-matcher.workspace = true
 ratatui.workspace = true
 serde.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt-multi-thread", "macros", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 vault-session.workspace = true
 zeroize.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+qrcode.workspace = true
+base64.workspace = true
+rand.workspace = true
+sha2.workspace = true
+percent-encoding.workspace = true
+clap_complete = "4"
+clap_mangen = "0.2"
+
+[features]
+default = ["autotype"]
+# Auto-type into the focused window (macOS osascript / xdotool / wtype).
+autotype = []
+# macOS Touch ID unlock (stub; see vault-session/src/biometric.rs).
+biometric = ["vault-session/biometric"]
+# WebAuthn / FIDO2 2FA scaffolding (see vault-session/src/webauthn.rs).
+webauthn = ["vault-session/webauthn"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

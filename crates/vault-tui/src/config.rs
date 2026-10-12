@@ -6,14 +6,19 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use vault_session::{app_data_dir, ensure_dir, GeneratorOptions};
 
+use crate::ui::CustomThemeColors;
+
 const CONFIG_FILE: &str = "config.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
-    /// UI theme name (see `ui::theme`).
+    /// UI theme name: `default`, `light`, `high-contrast`, `solarized`, or custom.
     #[serde(default = "default_theme")]
     pub theme: String,
-    /// Per-action keybinding overrides (not wired yet — reserved for custom keymaps).
+    /// Optional RGB color overrides for the active theme.
+    #[serde(default)]
+    pub colors: ThemeColorConfig,
+    /// Per-action keybinding overrides.
     #[serde(default)]
     pub keybindings: KeybindingOverrides,
     /// Default password generator options for the TUI / CLI.
@@ -22,6 +27,124 @@ pub struct AppConfig {
     /// Background vault sync while unlocked.
     #[serde(default)]
     pub sync: SyncConfig,
+    /// Enable mouse click/scroll interactions.
+    #[serde(default)]
+    pub mouse: bool,
+    /// Power-user features (copy sequence, auto-type, SSH agent confirmation, sorting).
+    #[serde(default)]
+    pub power: PowerConfig,
+}
+
+/// Settings for the P4 power-user features.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PowerConfig {
+    /// Copy sequence (`S`): offer TOTP as a third step after the password.
+    #[serde(default = "default_true")]
+    pub copy_sequence_totp: bool,
+    /// Ask for confirmation (listing the keys) before starting the SSH agent.
+    #[serde(default = "default_true")]
+    pub ssh_agent_confirm: bool,
+    /// Add agent keys with `ssh-add -c` (requires an `SSH_ASKPASS` helper).
+    #[serde(default)]
+    pub ssh_agent_confirm_each_use: bool,
+    /// Seconds to wait before auto-typing so the target window can be focused.
+    #[serde(default = "default_autotype_delay")]
+    pub autotype_delay_secs: u64,
+    /// Press Tab between username and password and Enter after the last field when auto-typing.
+    #[serde(default = "default_true")]
+    pub autotype_press_enter: bool,
+    /// Initial vault sort: `name`, `recent`, or `modified`.
+    #[serde(default = "default_sort")]
+    pub default_sort: String,
+}
+
+impl Default for PowerConfig {
+    fn default() -> Self {
+        Self {
+            copy_sequence_totp: true,
+            ssh_agent_confirm: true,
+            ssh_agent_confirm_each_use: false,
+            autotype_delay_secs: default_autotype_delay(),
+            autotype_press_enter: true,
+            default_sort: default_sort(),
+        }
+    }
+}
+
+fn default_autotype_delay() -> u64 {
+    3
+}
+
+fn default_sort() -> String {
+    "name".into()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThemeColorConfig {
+    pub accent: Option<String>,
+    pub accent_dim: Option<String>,
+    pub text: Option<String>,
+    pub muted: Option<String>,
+    pub danger: Option<String>,
+    pub success: Option<String>,
+    pub warning: Option<String>,
+    pub border: Option<String>,
+    pub border_focused: Option<String>,
+    pub digit: Option<String>,
+    pub symbol: Option<String>,
+}
+
+impl ThemeColorConfig {
+    pub fn to_custom(&self) -> CustomThemeColors {
+        CustomThemeColors {
+            accent: parse_rgb(self.accent.as_deref()),
+            accent_dim: parse_rgb(self.accent_dim.as_deref()),
+            text: parse_rgb(self.text.as_deref()),
+            muted: parse_rgb(self.muted.as_deref()),
+            danger: parse_rgb(self.danger.as_deref()),
+            success: parse_rgb(self.success.as_deref()),
+            warning: parse_rgb(self.warning.as_deref()),
+            border: parse_rgb(self.border.as_deref()),
+            border_focused: parse_rgb(self.border_focused.as_deref()),
+            digit: parse_rgb(self.digit.as_deref()),
+            symbol: parse_rgb(self.symbol.as_deref()),
+        }
+    }
+
+    pub fn has_any(&self) -> bool {
+        self.accent.is_some()
+            || self.accent_dim.is_some()
+            || self.text.is_some()
+            || self.muted.is_some()
+            || self.danger.is_some()
+            || self.success.is_some()
+            || self.warning.is_some()
+            || self.border.is_some()
+            || self.border_focused.is_some()
+            || self.digit.is_some()
+            || self.symbol.is_some()
+    }
+}
+
+/// Parse `"#rrggbb"` or `"r,g,b"` into an RGB triple.
+fn parse_rgb(s: Option<&str>) -> Option<(u8, u8, u8)> {
+    let s = s?.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        if hex.len() == 6 {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            return Some((r, g, b));
+        }
+    }
+    let parts: Vec<_> = s.split(',').map(str::trim).collect();
+    if parts.len() == 3 {
+        let r = parts[0].parse().ok()?;
+        let g = parts[1].parse().ok()?;
+        let b = parts[2].parse().ok()?;
+        return Some((r, g, b));
+    }
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,14 +152,27 @@ pub struct SyncConfig {
     /// Periodic sync interval in minutes (`0` or absent = disabled).
     #[serde(default = "default_background_sync_minutes")]
     pub background_interval_minutes: Option<u64>,
+    /// How often (seconds) to probe `GET /accounts/revision-date` while unlocked; a full `/sync`
+    /// only runs when the revision changed. `0` disables the probe.
+    ///
+    /// This is the live-update mechanism: the SignalR/WebSocket notification hub
+    /// (`/notifications/hub`) is not implemented, so changes made on other devices appear within
+    /// one poll interval. `background_interval_minutes` remains as a forced full-sync fallback.
+    #[serde(default = "default_revision_poll_seconds")]
+    pub revision_poll_seconds: Option<u64>,
 }
 
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             background_interval_minutes: default_background_sync_minutes(),
+            revision_poll_seconds: default_revision_poll_seconds(),
         }
     }
+}
+
+fn default_revision_poll_seconds() -> Option<u64> {
+    Some(60)
 }
 
 fn default_background_sync_minutes() -> Option<u64> {
@@ -45,7 +181,7 @@ fn default_background_sync_minutes() -> Option<u64> {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeybindingOverrides {
-    /// Example: `{ action = "quit", keys = "Ctrl+q" }` entries (stub).
+    /// Example: `{ action = "quit", keys = "Ctrl+q" }`
     #[serde(default)]
     pub overrides: Vec<KeybindingOverride>,
 }
@@ -92,9 +228,12 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            colors: ThemeColorConfig::default(),
             keybindings: KeybindingOverrides::default(),
             generator: GeneratorConfig::default(),
             sync: SyncConfig::default(),
+            mouse: false,
+            power: PowerConfig::default(),
         }
     }
 }
@@ -154,4 +293,15 @@ pub fn save_config(root: &Path, config: &AppConfig) -> std::io::Result<()> {
     let path = config_path(root);
     let body = toml::to_string_pretty(config).map_err(std::io::Error::other)?;
     vault_session::write_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_and_csv_rgb() {
+        assert_eq!(parse_rgb(Some("#af52de")), Some((175, 82, 222)));
+        assert_eq!(parse_rgb(Some("175, 82, 222")), Some((175, 82, 222)));
+    }
 }

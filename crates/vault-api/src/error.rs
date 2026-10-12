@@ -13,6 +13,8 @@ pub enum ApiError {
         providers: Vec<u8>,
         raw: serde_json::Value,
     },
+    #[error("new device verification required — enter the code emailed to you")]
+    NewDeviceVerificationRequired,
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("crypto error: {0}")]

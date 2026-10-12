@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use vault_session::{app_data_dir, ensure_dir, profile_dir, profiles_file, write_atomic};
+use vault_session::{
+    app_data_dir, ensure_dir, profile_dir, profiles_file, write_atomic, TimeoutAction,
+};
 
 /// On-disk profile registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,6 +36,17 @@ pub struct VaultProfile {
     /// Clipboard auto-clear delay in seconds (minimum 5 when applied).
     #[serde(default = "default_clipboard_clear_secs")]
     pub clipboard_clear_secs: u64,
+    /// What to do when the idle timeout fires: lock (default) or log out.
+    /// Org policy type 9 may override this.
+    #[serde(default)]
+    pub timeout_action: TimeoutAction,
+    /// Apply the timeout action when the TUI starts (log out instead of
+    /// restoring a locked session).
+    #[serde(default)]
+    pub timeout_on_startup: bool,
+    /// Apply the timeout action on system sleep / screen lock (best effort).
+    #[serde(default)]
+    pub lock_on_system_lock: bool,
 }
 
 fn default_clipboard_clear_secs() -> u64 {
@@ -75,6 +88,9 @@ impl ProfilesFile {
                 auto_lock_minutes: default_auto_lock_minutes(),
                 allow_plaintext_token: false,
                 clipboard_clear_secs: default_clipboard_clear_secs(),
+                timeout_action: TimeoutAction::Lock,
+                timeout_on_startup: false,
+                lock_on_system_lock: false,
             }],
         }
     }
@@ -293,6 +309,9 @@ fn migrate_legacy(root: &Path) -> Option<ProfilesFile> {
             auto_lock_minutes: default_auto_lock_minutes(),
             allow_plaintext_token: false,
             clipboard_clear_secs: default_clipboard_clear_secs(),
+            timeout_action: TimeoutAction::Lock,
+            timeout_on_startup: false,
+            lock_on_system_lock: false,
         }],
     })
 }
@@ -332,6 +351,9 @@ pub fn create_profile(
         auto_lock_minutes: default_auto_lock_minutes(),
         allow_plaintext_token: false,
         clipboard_clear_secs: default_clipboard_clear_secs(),
+        timeout_action: TimeoutAction::Lock,
+        timeout_on_startup: false,
+        lock_on_system_lock: false,
     });
     save_registry_to(root, file)?;
     Ok(id)
@@ -624,6 +646,23 @@ mod tests {
         update_profile_auto_lock(root, &mut file, "default", Some(45)).unwrap();
         assert_eq!(file.get("default").unwrap().auto_lock_minutes, Some(45));
         assert!(update_profile_auto_lock(root, &mut file, "default", Some(0)).is_err());
+    }
+
+    #[test]
+    fn timeout_options_default_and_round_trip() {
+        let json = r#"{"id":"a","name":"A","server_url":"","email":""}"#;
+        let p: VaultProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(p.timeout_action, TimeoutAction::Lock);
+        assert!(!p.timeout_on_startup);
+        assert!(!p.lock_on_system_lock);
+
+        let json = r#"{"id":"a","name":"A","server_url":"","email":"","timeout_action":"logout","timeout_on_startup":true,"lock_on_system_lock":true}"#;
+        let p: VaultProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(p.timeout_action, TimeoutAction::Logout);
+        assert!(p.timeout_on_startup);
+        assert!(p.lock_on_system_lock);
+        let back = serde_json::to_string(&p).unwrap();
+        assert!(back.contains("\"timeout_action\":\"logout\""));
     }
 
     #[test]

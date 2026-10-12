@@ -3,6 +3,7 @@ name = "vault-crypto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Bitwarden/Vaultwarden client-side cryptography"
 
 [dependencies]

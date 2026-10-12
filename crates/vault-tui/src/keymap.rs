@@ -70,6 +70,16 @@ pub const BINDINGS: &[KeyBinding] = &[
         context: "vault",
     },
     KeyBinding {
+        keys: "Shift+O",
+        action: "Share to organization",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "Space",
+        action: "Mark item for bulk share/delete",
+        context: "vault items",
+    },
+    KeyBinding {
         keys: "/",
         action: "Fuzzy search",
         context: "vault",
@@ -97,6 +107,16 @@ pub const BINDINGS: &[KeyBinding] = &[
     KeyBinding {
         keys: "m",
         action: "Resend email 2FA",
+        context: "2FA",
+    },
+    KeyBinding {
+        keys: "Tab / Shift+Tab / j k / ← →",
+        action: "Change 2FA provider",
+        context: "2FA",
+    },
+    KeyBinding {
+        keys: "Ctrl+o",
+        action: "Open Duo URL",
         context: "2FA",
     },
     KeyBinding {
@@ -203,6 +223,51 @@ pub const BINDINGS: &[KeyBinding] = &[
         keys: "Ctrl+g",
         action: "Insert generated password",
         context: "forms",
+    },
+    KeyBinding {
+        keys: "a / T",
+        action: "Auto-type login / TOTP (focus target first)",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "S",
+        action: "Copy sequence: username → password → TOTP",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "Q",
+        action: "Show password / TOTP as QR code",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "E · Ctrl+e",
+        action: "Edit notes in $EDITOR",
+        context: "vault · forms",
+    },
+    KeyBinding {
+        keys: "s",
+        action: "Cycle sort: name / recently used / modified",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "V",
+        action: "Attachments: open · preview · save",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "D",
+        action: "Domain rules editor",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "Ctrl+g",
+        action: "Generate Ed25519 key",
+        context: "SSH key form",
+    },
+    KeyBinding {
+        keys: "click · wheel",
+        action: "Select / scroll (config mouse = true)",
+        context: "vault",
     },
     KeyBinding {
         keys: "q",

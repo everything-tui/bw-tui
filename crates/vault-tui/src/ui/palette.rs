@@ -55,11 +55,7 @@ pub fn draw_command_palette(frame: &mut Frame, app: &App) {
     let actions = app.palette_filtered_actions();
     let mut lines = Vec::new();
     for (i, action) in actions.iter().take(10).enumerate() {
-        let bg = if i == *selected {
-            SELECT
-        } else {
-            Color::Reset
-        };
+        let bg = if i == *selected { SELECT } else { Color::Reset };
         lines.push(Line::from(Span::styled(
             action.label(),
             Style::default().fg(FG).bg(bg),
@@ -71,8 +67,5 @@ pub fn draw_command_palette(frame: &mut Frame, app: &App) {
             Style::default().fg(MUTED),
         )));
     }
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Left),
-        rows[1],
-    );
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), rows[1]);
 }

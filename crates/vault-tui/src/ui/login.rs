@@ -112,7 +112,14 @@ pub fn draw_login(frame: &mut Frame, app: &App) {
         frame,
         status,
         app,
-        &["Tab fields", "Ctrl+p profiles", "Ctrl+r remember", "Enter"],
+        &[
+            "Tab fields",
+            "Ctrl+p profiles",
+            "Ctrl+r remember",
+            "Ctrl+d device",
+            "Ctrl+o SSO",
+            "Enter",
+        ],
     );
 }
 
@@ -158,7 +165,7 @@ pub fn draw_2fa(frame: &mut Frame, app: &App) {
         .margin(1)
         .split(inner);
 
-    let providers = format_providers(&app.two_factor_providers);
+    let providers = app.two_factor_summary();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(app.email.clone(), Style::default().fg(FG)),
@@ -183,19 +190,20 @@ pub fn draw_2fa(frame: &mut Frame, app: &App) {
     } else if let Some(err) = &app.form_error {
         draw_message(frame, rows[6], MessageKind::Error, err);
     } else {
-        draw_message(
-            frame,
-            rows[6],
-            MessageKind::Hint,
-            "Enter the code from your authenticator",
-        );
+        draw_message(frame, rows[6], MessageKind::Hint, &app.two_factor_hint());
     }
 
     draw_status_bar(
         frame,
         status,
         app,
-        &["Space remember device", "Enter verify", "Esc back"],
+        &[
+            "Tab/j/k method",
+            "Ctrl+o Duo",
+            "Space remember",
+            "Enter verify",
+            "Esc back",
+        ],
     );
 }
 
@@ -381,13 +389,7 @@ fn draw_input_row(
     );
 }
 
-fn draw_remember(
-    frame: &mut Frame,
-    area: Rect,
-    checked: bool,
-    focused: bool,
-    label: &str,
-) {
+fn draw_remember(frame: &mut Frame, area: Rect, checked: bool, focused: bool, label: &str) {
     let fill = if focused { SELECT_BG } else { FIELD_BG };
     let marker = if focused { "▌" } else { " " };
     let box_mark = if checked { "✓" } else { " " };
@@ -445,31 +447,11 @@ fn draw_message(frame: &mut Frame, area: Rect, kind: MessageKind, text: &str) {
     );
 }
 
-fn format_providers(providers: &[u8]) -> String {
-    if providers.is_empty() {
-        return "authenticator".into();
-    }
-    providers
-        .iter()
-        .map(|p| match p {
-            0 => "authenticator",
-            1 => "email",
-            2 => "Duo",
-            3 => "YubiKey",
-            4 => "U2F",
-            5 => "remember",
-            6 => "organization Duo",
-            7 => "FIDO2",
-            _ => "provider",
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 pub fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App, hints: &[&str]) {
     let screen = match app.screen {
         Screen::Login => "LOGIN",
         Screen::TwoFactor => "2FA",
+        Screen::AuthWait => "AUTH",
         Screen::Unlock => "UNLOCK",
         Screen::Vault => "VAULT",
     };
@@ -548,4 +530,123 @@ fn truncate_str(s: &str, max: usize) -> String {
     } else {
         format!("{}…", s.chars().take(max - 1).collect::<String>())
     }
+}
+
+/// "Waiting for another device / SSO browser" screen.
+pub fn draw_auth_wait(frame: &mut Frame, app: &App) {
+    use crate::app::WaitKind;
+
+    let area = frame.area();
+    let (body, status) = split_status(area);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Min(10),
+            Constraint::Length(1),
+        ])
+        .split(body);
+
+    let Some(wait) = app.auth_ext.wait.as_ref() else {
+        draw_brand(frame, chunks[0], "Authenticating");
+        draw_status_bar(frame, status, app, &["Esc back"]);
+        return;
+    };
+    let title = match wait.kind {
+        WaitKind::DeviceApproval => "Login with device",
+        WaitKind::Sso => "Single sign-on",
+    };
+    draw_brand(frame, chunks[0], title);
+
+    let form = center_fixed(72, 14, chunks[1]);
+    let card = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(DIM_BORDER))
+        .style(Style::default().bg(FIELD_BG));
+    let inner = card.inner(form);
+    frame.render_widget(card, form);
+
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        app.email.clone(),
+        Style::default().fg(FG),
+    ))];
+    lines.push(Line::from(""));
+    match wait.kind {
+        WaitKind::DeviceApproval => {
+            lines.push(Line::from(Span::styled(
+                "Approve this request on a device where you are logged in.",
+                Style::default().fg(MUTED),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Fingerprint  ", Style::default().fg(MUTED)),
+                Span::styled(
+                    wait.fingerprint.clone(),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                wait.detail.clone(),
+                Style::default().fg(MUTED),
+            )));
+            lines.push(Line::from(""));
+            let secs = wait.started.elapsed().as_secs();
+            lines.push(Line::from(Span::styled(
+                format!("Waiting… {}:{:02}", secs / 60, secs % 60),
+                Style::default().fg(FG),
+            )));
+        }
+        WaitKind::Sso => {
+            lines.push(Line::from(Span::styled(
+                "Finish signing in with your identity provider in the browser.",
+                Style::default().fg(MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                "If the redirect does not reach this terminal, paste it below.",
+                Style::default().fg(MUTED),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                truncate_str(&wait.detail, inner.width.saturating_sub(2) as usize),
+                Style::default().fg(MUTED),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Callback  ", Style::default().fg(MUTED)),
+                Span::styled(
+                    format!("{}▌", truncate_str(&wait.paste, 52)),
+                    Style::default().fg(FG),
+                ),
+            ]));
+        }
+    }
+    if let Some(err) = &app.form_error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(ERR),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        ratatui::layout::Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: inner.height.saturating_sub(1),
+        },
+    );
+
+    let hints: &[&str] = match wait.kind {
+        WaitKind::DeviceApproval => &["Esc cancel"],
+        WaitKind::Sso => &["Enter submit pasted URL", "Esc cancel"],
+    };
+    draw_status_bar(frame, status, app, hints);
 }

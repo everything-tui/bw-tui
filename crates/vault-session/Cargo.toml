@@ -3,7 +3,15 @@ name = "vault-session"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Vault session orchestration: login, unlock, sync, CRUD"
+
+[features]
+default = []
+# macOS Touch ID unlock (stub — see src/biometric.rs).
+biometric = []
+# WebAuthn / FIDO2 2FA scaffolding (CTAP-HID framing; see src/webauthn.rs).
+webauthn = []
 
 [dependencies]
 vault-crypto.workspace = true
@@ -35,6 +43,11 @@ hmac.workspace = true
 sha2.workspace = true
 rsa.workspace = true
 regex.workspace = true
+ssh-key.workspace = true
+zxcvbn.workspace = true
+csv.workspace = true
+roxmltree.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

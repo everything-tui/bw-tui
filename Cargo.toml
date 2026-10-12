@@ -22,6 +22,11 @@ opt-level = 3
 [profile.dev.package.vault-crypto]
 opt-level = 3
 
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [workspace.dependencies]
 vault-crypto = { path = "crates/vault-crypto" }
 vault-api = { path = "crates/vault-api" }
@@ -66,3 +71,9 @@ sha1 = "0.10"
 percent-encoding = "2"
 bytes = "1"
 keyring = "3"
+qrcode = { version = "0.14", default-features = false }
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rand_core"] }
+zxcvbn = "3"
+csv = "1"
+roxmltree = "0.20"
+zip = { version = "2", default-features = false, features = ["deflate"] }

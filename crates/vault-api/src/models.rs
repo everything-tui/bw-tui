@@ -131,6 +131,34 @@ pub struct Organization {
     pub name: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
+    /// Membership role: 0 owner, 1 admin, 2 user, 3 manager (legacy), 4 custom.
+    #[serde(default, rename = "type")]
+    pub org_type: Option<u8>,
+    /// Membership status: 0 invited, 1 accepted, 2 confirmed.
+    #[serde(default)]
+    pub status: Option<u8>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub permissions: Option<OrgPermissions>,
+    #[serde(default)]
+    pub use_policies: Option<bool>,
+}
+
+/// Collection-related slice of the profile's organization permissions (custom roles).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgPermissions {
+    #[serde(default)]
+    pub edit_any_collection: bool,
+    #[serde(default)]
+    pub delete_any_collection: bool,
+    #[serde(default)]
+    pub create_new_collections: bool,
+    #[serde(default)]
+    pub edit_assigned_collections: bool,
+    #[serde(default)]
+    pub delete_assigned_collections: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -152,6 +180,15 @@ pub struct Collection {
     pub name: String,
     #[serde(default)]
     pub object: Option<String>,
+    /// Current user may only view items in this collection.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Passwords are hidden from the current user in this collection.
+    #[serde(default)]
+    pub hide_passwords: bool,
+    /// Current user may manage the collection (newer servers only).
+    #[serde(default)]
+    pub manage: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -204,6 +241,33 @@ pub struct Cipher {
     /// Preserve unknown server fields across deserialize → re-serialize.
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Cipher {
+    /// Server-provided `edit` permission flag (defaults to `true` when absent).
+    pub fn server_can_edit(&self) -> Option<bool> {
+        self.extra.get("edit").and_then(|v| v.as_bool())
+    }
+
+    /// Server-provided `viewPassword` flag (defaults to `true` when absent).
+    pub fn view_password(&self) -> bool {
+        self.extra
+            .get("viewPassword")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// RFC 3339 archive timestamp when the cipher is archived (`archivedDate`).
+    pub fn archived_date(&self) -> Option<&str> {
+        self.extra
+            .get("archivedDate")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archived_date().is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -331,7 +395,7 @@ pub struct CipherField {
     pub linked_id: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CipherRequest {
     #[serde(rename = "type")]
@@ -358,6 +422,10 @@ pub struct CipherRequest {
     pub password_history: Option<Vec<PasswordHistoryEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<CipherAttachment>>,
+    /// Re-keyed attachment metadata (id → fileName/key), used when sharing to an org.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments2:
+        Option<std::collections::BTreeMap<String, crate::org_models::AttachmentRekey>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -496,14 +564,100 @@ pub struct SendText {
 pub struct SendFile {
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
-    pub size: Option<String>,
+    /// File size in bytes (server may send a number or a numeric string).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_size_opt",
+        serialize_with = "serialize_size_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub size: Option<u64>,
     #[serde(default)]
     pub size_name: Option<String>,
     #[serde(default)]
     pub file_name: Option<String>,
     #[serde(default)]
     pub validated: bool,
+}
+
+fn deserialize_size_opt<'de, D>(d: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(u64),
+        Str(String),
+    }
+    Ok(match Option::<NumOrStr>::deserialize(d)? {
+        Some(NumOrStr::Num(n)) => Some(n),
+        Some(NumOrStr::Str(s)) => s.trim().parse().ok(),
+        None => None,
+    })
+}
+
+fn serialize_size_opt<S>(v: &Option<u64>, s: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match v {
+        Some(n) => s.serialize_u64(*n),
+        None => s.serialize_none(),
+    }
+}
+
+/// `POST /sends/access/{accessId}` request body.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAccessRequest {
+    /// Base64 PBKDF2 hash of the send password (never the plaintext).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+/// Public Send payload returned by `POST /sends/access/{accessId}`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendAccessResponse {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub send_type: u8,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub text: Option<SendText>,
+    #[serde(default)]
+    pub file: Option<SendFile>,
+    #[serde(default)]
+    pub expiration_date: Option<String>,
+    #[serde(default)]
+    pub creator_identifier: Option<String>,
+}
+
+/// `POST /sends/{id}/access/file/{fileId}` response.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendFileDownloadData {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub url: String,
+}
+
+/// `fileUploadType` values for `POST /sends/file/v2`.
+pub const SEND_FILE_UPLOAD_DIRECT: u8 = 0;
+pub const SEND_FILE_UPLOAD_AZURE: u8 = 1;
+
+/// `POST /sends/file/v2` response.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendFileUploadDataResponse {
+    #[serde(default)]
+    pub file_upload_type: u8,
+    #[serde(default)]
+    pub url: String,
+    pub send_response: SendResponse,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -530,6 +684,9 @@ pub struct SendRequest {
     pub file: Option<SendFile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deletion_date: Option<String>,
+    /// Encrypted file length in bytes (required by `POST /sends/file/v2`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_length: Option<u64>,
 }
 
 pub type SendResponse = Send;
@@ -550,4 +707,62 @@ pub struct CipherAttachment {
     pub key: Option<String>,
     #[serde(flatten, default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    #[test]
+    fn send_file_size_accepts_number_or_string() {
+        let n: SendFile =
+            serde_json::from_str(r#"{"id":"f","size":123,"sizeName":"123 Bytes"}"#).unwrap();
+        assert_eq!(n.size, Some(123));
+        let s: SendFile = serde_json::from_str(r#"{"id":"f","size":"456"}"#).unwrap();
+        assert_eq!(s.size, Some(456));
+        let none: SendFile = serde_json::from_str(r#"{"id":"f"}"#).unwrap();
+        assert_eq!(none.size, None);
+        let out = serde_json::to_value(&n).unwrap();
+        assert_eq!(out["size"], 123);
+    }
+
+    #[test]
+    fn send_access_response_parses() {
+        let r: SendAccessResponse = serde_json::from_str(
+            r#"{"id":"sid","type":1,"name":"2.a|b|c","file":{"id":"fid","fileName":"2.x|y|z","size":"10","sizeName":"10 Bytes"},"creatorIdentifier":"a@b.c","object":"send-access"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.send_type, 1);
+        assert_eq!(r.file.unwrap().id.as_deref(), Some("fid"));
+        assert_eq!(r.creator_identifier.as_deref(), Some("a@b.c"));
+    }
+
+    #[test]
+    fn send_request_serializes_file_length_and_password() {
+        let req = SendRequest {
+            send_type: 1,
+            name: "n".into(),
+            notes: None,
+            key: Some("k".into()),
+            password: Some("hash".into()),
+            max_access_count: Some(3),
+            expiration_date: None,
+            disabled: false,
+            hide_email: true,
+            text: None,
+            file: Some(SendFile {
+                file_name: Some("enc".into()),
+                size: Some(9),
+                ..Default::default()
+            }),
+            deletion_date: Some("2030-01-01T00:00:00.000Z".into()),
+            file_length: Some(9),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["fileLength"], 9);
+        assert_eq!(v["maxAccessCount"], 3);
+        assert_eq!(v["hideEmail"], true);
+        assert_eq!(v["file"]["size"], 9);
+        assert!(v.get("text").is_none());
+    }
 }

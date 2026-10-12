@@ -92,6 +92,32 @@ pub struct DecryptedPasswordHistory {
     pub last_used_date: Option<String>,
 }
 
+/// Decrypted FIDO2 / passkey metadata (private key material is never exposed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecryptedPasskey {
+    pub credential_id: Option<String>,
+    pub rp_id: String,
+    pub rp_name: Option<String>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    pub discoverable: bool,
+    pub creation_date: Option<String>,
+}
+
+impl DecryptedPasskey {
+    /// Short single-line label, e.g. `example.com (alice)`.
+    pub fn label(&self) -> String {
+        match self
+            .user_name
+            .as_deref()
+            .or(self.user_display_name.as_deref())
+        {
+            Some(u) if !u.is_empty() => format!("{} ({u})", self.rp_id),
+            _ => self.rp_id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DecryptedUri {
     pub uri: String,
@@ -116,6 +142,8 @@ pub struct DecryptedItem {
     pub uris: Vec<DecryptedUri>,
     pub custom_fields: Vec<DecryptedField>,
     pub password_history: Vec<DecryptedPasswordHistory>,
+    /// FIDO2 credentials stored on a login (display only; preserved verbatim on edit).
+    pub passkeys: Vec<DecryptedPasskey>,
     pub password_revision_date: Option<String>,
     pub creation_date: Option<String>,
     pub revision_date: Option<String>,
@@ -161,6 +189,18 @@ impl DecryptedItem {
 
     pub fn uri_match_types(&self) -> impl Iterator<Item = Option<i32>> + '_ {
         self.uris.iter().map(|u| u.match_type)
+    }
+
+    /// Warnings shown to the user when cloning this item (data that a clone cannot carry over).
+    pub fn clone_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.passkeys.is_empty() {
+            out.push(format!(
+                "{} passkey(s) are not copied — register new passkeys for the clone",
+                self.passkeys.len()
+            ));
+        }
+        out
     }
 
     pub fn identity_name(&self) -> Option<String> {
@@ -210,6 +250,32 @@ pub struct DecryptedFolder {
 pub struct DecryptedOrganization {
     pub id: String,
     pub name: String,
+    /// Membership role: 0 owner, 1 admin, 2 user, 3 manager (legacy), 4 custom.
+    pub org_type: Option<u8>,
+    /// Membership status: 0 invited, 1 accepted, 2 confirmed.
+    pub status: Option<u8>,
+    pub enabled: bool,
+    /// Custom-role permission: may edit any collection in the org.
+    pub edit_any_collection: bool,
+    /// Custom-role permission: may create collections.
+    pub create_new_collections: bool,
+}
+
+impl DecryptedOrganization {
+    /// Owner or admin.
+    pub fn is_admin(&self) -> bool {
+        matches!(self.org_type, Some(0) | Some(1))
+    }
+
+    /// Membership is confirmed (or unknown on older servers) and the org is enabled.
+    pub fn is_usable(&self) -> bool {
+        self.enabled && self.status.is_none_or(|s| s == 2)
+    }
+
+    /// May write to collections the member is not explicitly assigned to.
+    pub fn can_edit_any_collection(&self) -> bool {
+        self.is_admin() || self.edit_any_collection
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +283,12 @@ pub struct DecryptedCollection {
     pub id: String,
     pub name: String,
     pub organization_id: Option<String>,
+    /// Current user may only view items in this collection.
+    pub read_only: bool,
+    /// Passwords are hidden from the current user in this collection.
+    pub hide_passwords: bool,
+    /// Current user may manage this collection (`None` on servers that do not report it).
+    pub manage: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +301,18 @@ pub struct DecryptedSend {
     pub send_type: u8,
     pub disabled: bool,
     pub deletion_date: Option<String>,
+    pub expiration_date: Option<String>,
+    pub max_access_count: Option<u32>,
+    pub access_count: u32,
+    pub hide_email: bool,
+    /// Text Send body is hidden by default on the receive page.
+    pub text_hidden: bool,
+    /// A password hash is stored server-side for this Send.
+    pub has_password: bool,
+    /// Decrypted file name (file Sends).
+    pub file_name: Option<String>,
+    /// Human-readable file size from the server (file Sends).
+    pub file_size_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]

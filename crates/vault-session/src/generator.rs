@@ -59,6 +59,27 @@ fn filter_ambiguous(s: &str, avoid: bool) -> String {
     s.chars().filter(|c| !AMBIGUOUS.contains(*c)).collect()
 }
 
+/// Like [`generate_password_checked`] but regenerates (up to 25 times) until the zxcvbn score
+/// is at least `min_score` (0–4). Returns the best candidate if none reach the target.
+pub fn generate_password_min_score(
+    opts: GeneratorOptions,
+    min_score: u8,
+) -> Result<String, String> {
+    let mut best: Option<(u8, String)> = None;
+    for _ in 0..25 {
+        let pw = generate_password_checked(opts)?;
+        let score = crate::strength::evaluate_password(&pw, &[]).score;
+        if score >= min_score {
+            return Ok(pw);
+        }
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
+            best = Some((score, pw));
+        }
+    }
+    best.map(|(_, pw)| pw)
+        .ok_or_else(|| "password generation failed".into())
+}
+
 /// Generate a password with per-class guarantees using `OsRng`.
 ///
 /// Returns an error if `length` is outside 8..=128 or no character classes are enabled.
@@ -93,7 +114,9 @@ pub fn generate_password_checked(opts: GeneratorOptions) -> Result<String, Strin
     }
 
     let min_extra = opts.min_numbers.saturating_add(opts.min_special);
-    let required = classes.len().saturating_add(min_extra.saturating_sub(classes.len().min(2)));
+    let required = classes
+        .len()
+        .saturating_add(min_extra.saturating_sub(classes.len().min(2)));
     if opts.length < required.max(classes.len()) {
         return Err(format!(
             "length {} too short for selected character classes / minimums",
@@ -338,7 +361,9 @@ mod tests {
         );
         let parts: Vec<_> = p.split('-').collect();
         assert_eq!(parts.len(), 4);
-        assert!(parts.iter().any(|w| w.chars().next().unwrap().is_uppercase()));
+        assert!(parts
+            .iter()
+            .any(|w| w.chars().next().unwrap().is_uppercase()));
         assert!(p.chars().any(|c| c.is_ascii_digit()));
     }
 
