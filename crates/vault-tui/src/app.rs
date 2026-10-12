@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Local};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use vault_session::{
@@ -246,6 +247,8 @@ pub struct App {
     // --- Status / timers ---
     pub status: String,
     pub status_expires: Option<Instant>,
+    /// Local time of the most recent successful vault sync.
+    pub last_synced_at: Option<DateTime<Local>>,
     pub last_activity: Instant,
     pub locked_at: Option<Instant>,
     pub clipboard_clear_at: Option<Instant>,
@@ -375,6 +378,7 @@ impl App {
                 "Ready — press ? for help".into()
             },
             status_expires: None,
+            last_synced_at: None,
             last_activity: Instant::now(),
             locked_at: None,
             clipboard_clear_at: None,
@@ -613,6 +617,7 @@ impl App {
                 self.reload_from_session();
                 self.screen = Screen::Vault;
                 self.locked_at = None;
+                self.mark_synced();
                 self.set_status("Logged in");
                 self.touch();
             }
@@ -864,6 +869,7 @@ impl App {
         } else {
             LoginField::Password
         };
+        self.last_synced_at = None;
         self.set_status("Signed out");
     }
 
@@ -1121,6 +1127,7 @@ impl App {
                 self.reload_from_session();
                 self.screen = Screen::Vault;
                 self.locked_at = None;
+                self.mark_synced();
                 self.set_status("Logged in");
                 self.touch();
             }
@@ -1170,6 +1177,7 @@ impl App {
                 self.screen = Screen::Vault;
                 self.locked_at = None;
                 self.last_activity = Instant::now();
+                self.mark_synced();
                 self.set_status("Vault unlocked");
                 self.touch();
             }
@@ -1488,9 +1496,40 @@ impl App {
         self.status_expires = Some(Instant::now() + Duration::from_secs(4));
     }
 
+    fn mark_synced(&mut self) {
+        self.last_synced_at = Some(Local::now());
+    }
+
+    fn last_synced_status(&self) -> Option<String> {
+        self.last_synced_at.map(|t| {
+            let base = format!("Synced last at {}", t.format("%H:%M:%S"));
+            if self.using_mock {
+                format!("{base} (mock)")
+            } else {
+                base
+            }
+        })
+    }
+
+    fn vault_idle_status(&self) -> String {
+        self.last_synced_status().unwrap_or_else(|| {
+            if self.using_mock {
+                "Mock vault — press ? for help".into()
+            } else {
+                "Ready".into()
+            }
+        })
+    }
+
+    fn show_last_synced_status(&mut self) {
+        self.status = self.vault_idle_status();
+        self.status_expires = None;
+    }
+
     pub async fn sync_vault(&mut self) {
         if self.using_mock {
-            self.set_status("Synced (mock — no remote)");
+            self.mark_synced();
+            self.show_last_synced_status();
             self.touch();
             return;
         }
@@ -1504,7 +1543,8 @@ impl App {
         match result {
             Ok(()) => {
                 self.reload_from_session();
-                self.set_status("Synced");
+                self.mark_synced();
+                self.show_last_synced_status();
                 self.touch();
             }
             Err(e) => self.set_status(format!("Sync failed: {e}")),
@@ -2007,13 +2047,7 @@ impl App {
         if let Some(exp) = self.status_expires {
             if now >= exp && !self.status.starts_with("Locked") && !self.busy {
                 self.status = match self.screen {
-                    Screen::Vault => {
-                        if self.using_mock {
-                            "Mock vault — press ? for help".into()
-                        } else {
-                            "Ready".into()
-                        }
-                    }
+                    Screen::Vault => self.vault_idle_status(),
                     Screen::Login => "Enter credentials to continue".into(),
                     Screen::TwoFactor => "Enter your two-factor code".into(),
                     Screen::Unlock => "Enter master password to unlock".into(),
