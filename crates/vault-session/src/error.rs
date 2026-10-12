@@ -12,6 +12,8 @@ pub enum SessionError {
     Locked,
     #[error("not logged in")]
     NotLoggedIn,
+    #[error("offline — connect to sync or edit")]
+    Offline,
     #[error("two-factor required (providers: {providers:?})")]
     TwoFactorRequired { providers: Vec<u8> },
     #[error("item not found")]

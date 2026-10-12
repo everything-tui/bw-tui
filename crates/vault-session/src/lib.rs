@@ -8,6 +8,7 @@ mod models;
 mod paths;
 mod secure_storage;
 mod session;
+mod vault_cache;
 
 pub use clipboard::ClipboardService;
 pub use error::{Result, SessionError};

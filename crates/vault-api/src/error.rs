@@ -31,6 +31,21 @@ impl From<reqwest::Error> for ApiError {
     }
 }
 
+impl ApiError {
+    /// True for connect/timeout/request transport failures (not HTTP 4xx/5xx bodies).
+    pub fn is_transport(&self) -> bool {
+        match self {
+            Self::Http(err) => err.is_connect() || err.is_timeout() || err.is_request(),
+            _ => false,
+        }
+    }
+
+    /// True when the server rejected credentials / tokens.
+    pub fn is_auth_rejection(&self) -> bool {
+        matches!(self, Self::Api { status, .. } if matches!(*status, 400 | 401 | 403))
+    }
+}
+
 fn format_http(err: &reqwest::Error) -> String {
     // Prefer a short host:port label so TUI error rows stay readable.
     let target = err

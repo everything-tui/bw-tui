@@ -135,6 +135,50 @@ pub struct PersistedAuth {
     pub device_id: String,
     pub protected_key: Option<String>,
     pub private_key: Option<String>,
+    /// Cached prelogin KDF type (0 = PBKDF2, 1 = Argon2id) for offline unlock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kdf: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kdf_iterations: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kdf_memory: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kdf_parallelism: Option<u32>,
+}
+
+impl PersistedAuth {
+    pub fn to_kdf_params(&self) -> Option<vault_crypto::KdfParams> {
+        let iterations = self.kdf_iterations?;
+        Some(match self.kdf.unwrap_or(0) {
+            1 => vault_crypto::KdfParams::Argon2id {
+                iterations,
+                memory_kb: self.kdf_memory.unwrap_or(64 * 1024),
+                parallelism: self.kdf_parallelism.unwrap_or(4),
+            },
+            _ => vault_crypto::KdfParams::Pbkdf2 { iterations },
+        })
+    }
+
+    pub fn set_kdf_from_params(&mut self, kdf: &vault_crypto::KdfParams) {
+        match kdf {
+            vault_crypto::KdfParams::Pbkdf2 { iterations } => {
+                self.kdf = Some(0);
+                self.kdf_iterations = Some(*iterations);
+                self.kdf_memory = None;
+                self.kdf_parallelism = None;
+            }
+            vault_crypto::KdfParams::Argon2id {
+                iterations,
+                memory_kb,
+                parallelism,
+            } => {
+                self.kdf = Some(1);
+                self.kdf_iterations = Some(*iterations);
+                self.kdf_memory = Some(*memory_kb);
+                self.kdf_parallelism = Some(*parallelism);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]

@@ -618,7 +618,7 @@ impl App {
                 self.screen = Screen::Vault;
                 self.locked_at = None;
                 self.mark_synced();
-                self.set_status("Logged in");
+                self.show_last_synced_status();
                 self.touch();
             }
             Ok(LoginResult::TwoFactorRequired { providers }) => {
@@ -1128,7 +1128,7 @@ impl App {
                 self.screen = Screen::Vault;
                 self.locked_at = None;
                 self.mark_synced();
-                self.set_status("Logged in");
+                self.show_last_synced_status();
                 self.touch();
             }
             Err(e) => {
@@ -1178,7 +1178,7 @@ impl App {
                 self.locked_at = None;
                 self.last_activity = Instant::now();
                 self.mark_synced();
-                self.set_status("Vault unlocked");
+                self.show_last_synced_status();
                 self.touch();
             }
             Err(e) => {
@@ -1235,6 +1235,9 @@ impl App {
         let Some(session) = self.session.as_ref() else {
             return;
         };
+        if let Some(ts) = session.last_synced_at() {
+            self.last_synced_at = Some(ts.with_timezone(&Local));
+        }
         let items: Vec<DecryptedItem> = session.items().iter().map(DecryptedItem::from_session).collect();
         let folders: Vec<FolderView> = session
             .folders()
@@ -1257,6 +1260,10 @@ impl App {
         if self.selected_item >= self.visible.len() {
             self.selected_item = self.visible.len().saturating_sub(1);
         }
+    }
+
+    fn session_is_offline(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.is_offline())
     }
 
     // -------------------------------------------------------------------------
@@ -1497,16 +1504,22 @@ impl App {
     }
 
     fn mark_synced(&mut self) {
-        self.last_synced_at = Some(Local::now());
+        if let Some(ts) = self.session.as_ref().and_then(|s| s.last_synced_at()) {
+            self.last_synced_at = Some(ts.with_timezone(&Local));
+        } else {
+            self.last_synced_at = Some(Local::now());
+        }
     }
 
     fn last_synced_status(&self) -> Option<String> {
         self.last_synced_at.map(|t| {
-            let base = format!("Synced last at {}", t.format("%H:%M:%S"));
-            if self.using_mock {
-                format!("{base} (mock)")
+            let time = t.format("%H:%M:%S");
+            if self.session_is_offline() {
+                format!("Offline — Synced last at {time}")
+            } else if self.using_mock {
+                format!("Synced last at {time} (mock)")
             } else {
-                base
+                format!("Synced last at {time}")
             }
         })
     }
@@ -1515,6 +1528,8 @@ impl App {
         self.last_synced_status().unwrap_or_else(|| {
             if self.using_mock {
                 "Mock vault — press ? for help".into()
+            } else if self.session_is_offline() {
+                "Offline — no sync timestamp".into()
             } else {
                 "Ready".into()
             }

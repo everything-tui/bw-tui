@@ -52,7 +52,8 @@ Under the app data directory (`~/Library/Application Support/com.bitwarden-tui.b
 
 ```text
 profiles.json                 # registry + active profile
-profiles/<id>/auth.json       # profile auth metadata (refresh token prefers OS keychain)
+profiles/<id>/auth.json       # profile auth metadata + cached KDF (refresh token prefers OS keychain)
+profiles/<id>/vault.cache     # UserKey-encrypted last sync (offline unlock)
 ```
 
 Older installs with a flat `login.json` / `auth.json` are migrated once into profile `default`.
@@ -83,6 +84,7 @@ Press `?` in the app for the full map. Use `--mock` for UI-only demos without a 
 
 - Master passwords and decrypted secrets stay in process memory only for the session; quit the app when finished.
 - “Remember” stores the profile’s server URL and email in `profiles.json`, plus auth metadata in `profiles/<id>/auth.json`. The refresh token is stored in the **OS secure store** (macOS Keychain / Windows Credential Manager / Linux Secret Service) when available, with a plaintext disk fallback if secure storage fails—same model as the official Bitwarden desktop client. The master password is never written to disk.
+- After a successful sync, the encrypted vault payload is cached in `profiles/<id>/vault.cache` (ciphertext only; encrypted with your UserKey). On later unlocks without network, the app can decrypt that last synced state with your master password. Offline mode is **read-only** (browse/copy); create/edit/delete/favorite require connectivity. Sign-out deletes the cache.
 - Prefer HTTPS and a trusted Vaultwarden instance in production. The Docker Compose stack is **dev/test only** (`SIGNUPS_ALLOWED=true`, fixed `ADMIN_TOKEN`).
 - Never commit `.env`, admin tokens, or vault data volumes.
 - Clipboard copies may linger in the system clipboard; clear them after use if on a shared machine.
