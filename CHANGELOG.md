@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Help overlay (`?`) groups shortcuts by context (Global, Login, 2FA, Vault, …) with `j`/`k` scroll
+- TUI New Send is a Quick create overlay (content + optional password; `Enter` saves; auto name). Tab to **Advanced…** (or `a` before typing) for the full field list; edit (`e`) still opens the full form
+- With the left sidebar focused, `s` opens Quick New Send; with items/detail focused, `s` still cycles sort
+
 ### Added
 
 - Feature-gap roadmap P0–P5: themes/keybinds, Sends+receive, zxcvbn/health/revision sync, multi-format import/export, timeout/sleep lock + org policies, org share/bulk, 2FA picker + account tools, power-user TUI (QR/editor/autotype/toasts/watchtower/domain rules), CLI unlock daemon / serve / CRUD / completions

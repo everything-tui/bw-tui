@@ -1,5 +1,7 @@
 //! State and validation for the Send create/edit form (text + file Sends).
 
+use std::path::Path;
+
 use chrono::{DateTime, Local, Utc};
 use vault_session::{parse_send_date, SendOptions};
 
@@ -22,11 +24,16 @@ pub enum SendFormField {
     HideEmail,
     HiddenText,
     Disabled,
+    /// Quick-create only: Tab here and Enter/Space/a expands to the full form.
+    Advanced,
 }
 
 impl SendFormField {
     pub fn is_toggle(self) -> bool {
-        matches!(self, Self::HideEmail | Self::HiddenText | Self::Disabled)
+        matches!(
+            self,
+            Self::HideEmail | Self::HiddenText | Self::Disabled | Self::Advanced
+        )
     }
 }
 
@@ -50,6 +57,8 @@ pub struct SendFormState {
     pub remove_password: bool,
     /// Org policy forbids hiding the creator email.
     pub hide_email_blocked: bool,
+    /// When false on a new Send, only Content + Password are shown (Quick create).
+    pub advanced: bool,
     pub field: SendFormField,
     pub error: Option<String>,
 }
@@ -72,13 +81,85 @@ impl SendFormState {
             has_password: false,
             remove_password: false,
             hide_email_blocked: false,
-            field: SendFormField::Name,
+            advanced: false,
+            field: SendFormField::Content,
             error: None,
+        }
+    }
+
+    /// Quick create: content + optional password only (new Sends before Advanced).
+    pub fn is_quick(&self) -> bool {
+        !self.advanced && self.editing_id.is_none()
+    }
+
+    /// Expand Quick → Advanced (keeps content/password; focuses Name if empty).
+    pub fn set_advanced(&mut self, on: bool) {
+        if on == self.advanced {
+            return;
+        }
+        self.advanced = on;
+        if on {
+            self.field = if self.name.trim().is_empty() {
+                SendFormField::Name
+            } else if self.fields().contains(&self.field) {
+                self.field
+            } else {
+                SendFormField::Content
+            };
+        }
+        self.error = None;
+    }
+
+    /// Suggested name when the user left Name blank.
+    pub fn auto_name(&self) -> String {
+        match self.kind {
+            SendKind::File => Path::new(self.content.trim())
+                .file_name()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("File")
+                .to_string(),
+            SendKind::Text => {
+                let t = self.content.trim();
+                if t.is_empty() {
+                    return "Send".into();
+                }
+                let mut out = String::new();
+                for (i, c) in t.chars().enumerate() {
+                    if i >= 40 {
+                        out.push('…');
+                        break;
+                    }
+                    if c == '\n' || c == '\r' {
+                        break;
+                    }
+                    out.push(c);
+                }
+                if out.is_empty() {
+                    "Send".into()
+                } else {
+                    out
+                }
+            }
+        }
+    }
+
+    /// Fill blank name from content before validate/submit.
+    pub fn ensure_name(&mut self) {
+        if self.name.trim().is_empty() {
+            self.name = self.auto_name();
         }
     }
 
     /// Fields shown for the current mode, in tab order.
     pub fn fields(&self) -> Vec<SendFormField> {
+        if self.is_quick() {
+            return vec![
+                SendFormField::Content,
+                SendFormField::Password,
+                SendFormField::Advanced,
+            ];
+        }
         let mut v = vec![
             SendFormField::Name,
             SendFormField::Content,
@@ -146,6 +227,7 @@ impl SendFormState {
             SendFormField::HideEmail => self.hide_email = !self.hide_email,
             SendFormField::HiddenText => self.hidden_text = !self.hidden_text,
             SendFormField::Disabled => self.disabled = !self.disabled,
+            SendFormField::Advanced => self.set_advanced(true),
             SendFormField::Password if self.has_password && self.password.is_empty() => {
                 self.remove_password = !self.remove_password;
             }
@@ -218,6 +300,7 @@ impl SendFormState {
     }
 
     /// Basic completeness check before hitting the network.
+    /// Call [`Self::ensure_name`] first so Quick create can omit the name field.
     pub fn validate_required(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("Send name is required".into());
@@ -354,8 +437,33 @@ mod tests {
     }
 
     #[test]
-    fn text_form_fields_and_cycle() {
+    fn quick_create_fields_and_cycle() {
         let mut f = SendFormState::new(SendKind::Text);
+        assert!(f.is_quick());
+        assert_eq!(
+            f.fields(),
+            vec![
+                SendFormField::Content,
+                SendFormField::Password,
+                SendFormField::Advanced,
+            ]
+        );
+        assert_eq!(f.field, SendFormField::Content);
+        f.next_field();
+        assert_eq!(f.field, SendFormField::Password);
+        f.next_field();
+        assert_eq!(f.field, SendFormField::Advanced);
+        f.toggle_current();
+        assert!(!f.is_quick());
+        assert_eq!(f.field, SendFormField::Name);
+    }
+
+    #[test]
+    fn advanced_expands_fields_and_focuses_name() {
+        let mut f = SendFormState::new(SendKind::Text);
+        f.content = "hello world".into();
+        f.set_advanced(true);
+        assert!(!f.is_quick());
         assert!(f.fields().contains(&SendFormField::HiddenText));
         assert_eq!(f.field, SendFormField::Name);
         f.next_field();
@@ -368,8 +476,25 @@ mod tests {
     }
 
     #[test]
+    fn auto_name_from_text_and_file_path() {
+        let mut f = SendFormState::new(SendKind::Text);
+        f.content = "  secret note line\nmore".into();
+        assert_eq!(f.auto_name(), "secret note line");
+        f.content = "x".repeat(50);
+        let n = f.auto_name();
+        assert!(n.ends_with('…'));
+        assert_eq!(n.chars().count(), 41);
+        f.kind = SendKind::File;
+        f.content = "/tmp/reports/out.pdf".into();
+        assert_eq!(f.auto_name(), "out.pdf");
+        f.ensure_name();
+        assert_eq!(f.name, "out.pdf");
+    }
+
+    #[test]
     fn file_kind_hides_hidden_text_and_clears_content() {
         let mut f = SendFormState::new(SendKind::Text);
+        f.set_advanced(true);
         f.content = "abc".into();
         f.toggle_kind();
         assert_eq!(f.kind, SendKind::File);
@@ -380,7 +505,9 @@ mod tests {
     #[test]
     fn editing_file_send_skips_content_and_cannot_change_kind() {
         let mut f = SendFormState::new(SendKind::File);
+        f.advanced = true;
         f.editing_id = Some("id".into());
+        f.field = SendFormField::Name;
         f.toggle_kind();
         assert_eq!(f.kind, SendKind::File);
         f.next_field();
@@ -391,8 +518,18 @@ mod tests {
     }
 
     #[test]
+    fn edit_path_is_not_quick() {
+        let mut f = SendFormState::new(SendKind::Text);
+        f.editing_id = Some("id".into());
+        f.advanced = true;
+        assert!(!f.is_quick());
+        assert!(f.fields().contains(&SendFormField::Name));
+    }
+
+    #[test]
     fn hide_email_blocked_by_policy() {
         let mut f = SendFormState::new(SendKind::Text);
+        f.set_advanced(true);
         f.hide_email_blocked = true;
         f.hide_email = true;
         assert!(!f.fields().contains(&SendFormField::HideEmail));
@@ -402,6 +539,7 @@ mod tests {
     #[test]
     fn max_access_only_digits_and_options_conversion() {
         let mut f = SendFormState::new(SendKind::Text);
+        f.set_advanced(true);
         f.field = SendFormField::MaxAccess;
         f.push_char('x');
         f.push_char('5');

@@ -39,7 +39,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     if app.show_help {
-        help::draw_help(frame);
+        help::draw_help(frame, app);
     }
 
     power::draw_toasts(frame, app);

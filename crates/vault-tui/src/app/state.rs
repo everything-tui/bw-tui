@@ -776,6 +776,8 @@ pub struct App {
     pub screen: Screen,
     pub should_quit: bool,
     pub show_help: bool,
+    /// Scroll offset (lines) while the help overlay is open.
+    pub help_scroll: usize,
     pub overlay: Overlay,
 
     /// App data root (profile registry lives here).
@@ -970,6 +972,7 @@ impl App {
             screen: Screen::Login,
             should_quit: false,
             show_help: false,
+            help_scroll: 0,
             overlay: Overlay::None,
             data_root,
             profiles,
@@ -4581,6 +4584,9 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::ToggleHelp => {
                 self.show_help = !self.show_help;
+                if self.show_help {
+                    self.help_scroll = 0;
+                }
                 self.close_overlay();
             }
             Action::OpenProfileManager => {
@@ -5086,6 +5092,9 @@ impl App {
             .session
             .as_ref()
             .is_some_and(|s| s.send_policy().disable_hide_email == Some(true));
+        // Quick create: Content + Password only (`a` expands to advanced).
+        debug_assert!(!form.advanced);
+        debug_assert_eq!(form.field, crate::send_form::SendFormField::Content);
         self.overlay = Overlay::SendForm {
             form: Box::new(form),
         };
@@ -5104,6 +5113,8 @@ impl App {
             crate::send_form::SendKind::Text
         };
         let mut form = crate::send_form::SendFormState::new(kind);
+        form.advanced = true;
+        form.field = crate::send_form::SendFormField::Name;
         form.editing_id = Some(send.id.clone());
         form.name = send.name.clone();
         form.content = if send.is_file {
@@ -5273,9 +5284,10 @@ impl App {
     }
 
     pub async fn submit_send_form(&mut self) {
-        let Overlay::SendForm { form } = &self.overlay else {
+        let Overlay::SendForm { form } = &mut self.overlay else {
             return;
         };
+        form.ensure_name();
         let form = (**form).clone();
         if let Err(e) = form.validate_required() {
             self.set_send_form_error(e);

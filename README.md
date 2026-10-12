@@ -98,7 +98,9 @@ Older installs with a flat `login.json` / `auth.json` are migrated once into pro
 | `Tab` / `p` (unlock) | Toggle master password vs PIN unlock (when PIN configured) |
 | `,` | Account settings (fingerprint, password hint, change-password stub) |
 | `Shift+C` | Clone selected personal item |
-| `n` / `e` / `d` / `L` (Sends filter) | New / edit / delete / copy link. The form covers text or file (`Ctrl+t`), notes, password, max access count, expiration + deletion dates (`2026-11-01 18:00`, `7d`, `12h`, RFC 3339), hide email, hide text, disabled; `Ctrl+s` saves |
+| `s` (sidebar focused) | Quick New Send from any sidebar row (same overlay as below) |
+| `n` / `e` / `d` / `L` (Sends filter) | New / edit / delete / copy link. **New** opens Quick create (text or file path + optional password; `Enter` saves; name auto-filled; `Ctrl+t` toggles type). Tab to **Advanced…** (or `a` before typing) for name, notes, max access, dates, hide email/text, disabled. **Edit** always uses the full form |
+| `s` (items / detail) | Cycle sort: name / recently used / modified |
 | `O` or palette → *Open Send link* | Receive a Send from a share URL (password prompt if needed; `c` copy text, `r` reveal, `Enter` saves file Sends) |
 | `r` | Reveal secrets in detail (15s) / restore from trash |
 | `n` / `e` / `d` / `f` | New item (login, note, card, identity, SSH) / edit / delete / favorite |

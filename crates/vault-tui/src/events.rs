@@ -58,6 +58,26 @@ async fn handle_key(
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
                 app.show_help = false;
+                app.help_scroll = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.help_scroll = app.help_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.help_scroll = app.help_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                app.help_scroll = app.help_scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                app.help_scroll = app.help_scroll.saturating_sub(10);
+            }
+            KeyCode::Home => {
+                app.help_scroll = 0;
+            }
+            KeyCode::End => {
+                // Draw clamps to content; jump far enough for any terminal size.
+                app.help_scroll = usize::MAX / 4;
             }
             _ => {}
         }
@@ -128,6 +148,7 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
                 && app.login_field != LoginField::Remember =>
         {
             app.show_help = true;
+            app.help_scroll = 0;
             false
         }
         KeyCode::Tab | KeyCode::Down => {
@@ -263,6 +284,7 @@ async fn handle_unlock(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char('?') if is_typing(&key) => {
             app.show_help = true;
+            app.help_scroll = 0;
             false
         }
         KeyCode::Enter => {
@@ -346,6 +368,7 @@ async fn handle_vault(
         }
         KeyCode::Char('?') if is_typing(&key) => {
             app.show_help = true;
+            app.help_scroll = 0;
         }
         KeyCode::Tab => {
             app.focus_next(detail_visible, folders_visible);
@@ -2042,6 +2065,20 @@ async fn handle_send_form(app: &mut App, key: KeyEvent) -> bool {
     }
     match key.code {
         KeyCode::Esc => app.close_overlay(),
+        KeyCode::Enter => {
+            let expand = matches!(
+                &app.overlay,
+                Overlay::SendForm { form }
+                    if form.is_quick() && form.field == SendFormField::Advanced
+            );
+            if expand {
+                if let Overlay::SendForm { form } = &mut app.overlay {
+                    form.set_advanced(true);
+                }
+            } else {
+                app.submit_send_form().await;
+            }
+        }
         KeyCode::Tab | KeyCode::Down => {
             if let Overlay::SendForm { form } = &mut app.overlay {
                 form.next_field();
@@ -2050,6 +2087,23 @@ async fn handle_send_form(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::BackTab | KeyCode::Up => {
             if let Overlay::SendForm { form } = &mut app.overlay {
                 form.prev_field();
+            }
+        }
+        // Quick → Advanced: bare `a` (does not steal letters from Content/Password —
+        // only when the Advanced row is focused, or as a global shortcut in quick mode
+        // when Content is empty so typing "a…" still works after the first char).
+        KeyCode::Char('a')
+            if is_typing(&key)
+                && matches!(
+                    &app.overlay,
+                    Overlay::SendForm { form }
+                        if form.is_quick()
+                            && (form.field == SendFormField::Advanced
+                                || form.content.is_empty() && form.password.is_empty())
+                ) =>
+        {
+            if let Overlay::SendForm { form } = &mut app.overlay {
+                form.set_advanced(true);
             }
         }
         KeyCode::Char(' ') if is_typing(&key) => {

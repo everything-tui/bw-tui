@@ -232,21 +232,30 @@ pub fn draw_send_form(frame: &mut Frame, app: &App) {
         return;
     };
     let area = frame.area();
-    let popup = center_fixed(64, 20, area);
+    let quick = form.is_quick();
+    let popup = if quick {
+        center_fixed(64, 10, area)
+    } else {
+        center_fixed(64, 20, area)
+    };
     frame.render_widget(Clear, popup);
     let title = if form.editing_id.is_some() {
         " Edit Send "
-    } else {
+    } else if quick {
         " New Send "
+    } else {
+        " New Send (advanced) "
+    };
+    let footer = if quick {
+        " Enter save · Tab · a / Advanced… · Ctrl+t type · Esc "
+    } else {
+        " Tab · Ctrl+t type · Enter/Ctrl+s save · Esc "
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
         .title(title)
-        .title_bottom(Span::styled(
-            " Tab · Ctrl+t type · Ctrl+s save · Esc ",
-            Style::default().fg(MUTED),
-        ));
+        .title_bottom(Span::styled(footer, Style::default().fg(MUTED)));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let kind = match form.kind {
@@ -279,47 +288,61 @@ pub fn draw_send_form(frame: &mut Frame, app: &App) {
         };
         Line::from(Span::styled(format!("{label:<12} {value}"), style))
     };
-    let lines = vec![
-        row("Type", kind, false),
-        row("Name", &form.name, form.field == SendFormField::Name),
-        row(
+    let mut lines = vec![row("Type", kind, false)];
+    if quick {
+        lines.push(row(
             content_label,
             &form.content,
             form.field == SendFormField::Content,
-        ),
-        row("Notes", &form.notes, form.field == SendFormField::Notes),
-        row("Password", pw, form.field == SendFormField::Password),
-        row(
-            "Max access",
-            &form.max_access,
-            form.field == SendFormField::MaxAccess,
-        ),
-        row(
-            "Expires",
-            &form.expiration,
-            form.field == SendFormField::Expiration,
-        ),
-        row(
-            "Deletion",
-            &form.deletion,
-            form.field == SendFormField::Deletion,
-        ),
-        row(
-            "Hide email",
-            &format!("[{}]", on(form.hide_email)),
-            form.field == SendFormField::HideEmail,
-        ),
-        row(
-            "Hide text",
-            &format!("[{}]", on(form.hidden_text)),
-            form.field == SendFormField::HiddenText,
-        ),
-        row(
-            "Disabled",
-            &format!("[{}]", on(form.disabled)),
-            form.field == SendFormField::Disabled,
-        ),
-    ];
+        ));
+        lines.push(row("Password", pw, form.field == SendFormField::Password));
+        lines.push(row(
+            "Advanced…",
+            "name, dates, options",
+            form.field == SendFormField::Advanced,
+        ));
+    } else {
+        lines.extend([
+            row("Name", &form.name, form.field == SendFormField::Name),
+            row(
+                content_label,
+                &form.content,
+                form.field == SendFormField::Content,
+            ),
+            row("Notes", &form.notes, form.field == SendFormField::Notes),
+            row("Password", pw, form.field == SendFormField::Password),
+            row(
+                "Max access",
+                &form.max_access,
+                form.field == SendFormField::MaxAccess,
+            ),
+            row(
+                "Expires",
+                &form.expiration,
+                form.field == SendFormField::Expiration,
+            ),
+            row(
+                "Deletion",
+                &form.deletion,
+                form.field == SendFormField::Deletion,
+            ),
+            row(
+                "Hide email",
+                &format!("[{}]", on(form.hide_email)),
+                form.field == SendFormField::HideEmail,
+            ),
+            row(
+                "Hide text",
+                &format!("[{}]", on(form.hidden_text)),
+                form.field == SendFormField::HiddenText,
+            ),
+            row(
+                "Disabled",
+                &format!("[{}]", on(form.disabled)),
+                form.field == SendFormField::Disabled,
+            ),
+        ]);
+    }
     let mut out = lines;
     if let Some(err) = &form.error {
         out.push(Line::from(Span::styled(

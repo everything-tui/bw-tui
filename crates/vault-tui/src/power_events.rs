@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, DomainInput, Overlay, PowerOverlay, Screen};
+use crate::app::{App, DomainInput, FocusPane, Overlay, PowerOverlay, Screen};
 use vault_session::{format_domain_group, parse_domain_group};
 
 fn is_typing(key: &KeyEvent) -> bool {
@@ -17,7 +17,7 @@ fn ctrl(key: &KeyEvent, c: char) -> bool {
 /// New vault-browser shortcuts. Returns `Some(quit)` when the key was consumed.
 ///
 /// `a` auto-type · `T` type TOTP · `S` copy sequence · `Q` QR · `E` edit notes in `$EDITOR` ·
-/// `s` sort cycle · `V` attachments (view / open) · `D` domain rules.
+/// `s` Quick Send (sidebar) / sort cycle (items·detail) · `V` attachments · `D` domain rules.
 pub async fn handle_vault_key(app: &mut App, key: &KeyEvent) -> Option<bool> {
     if app.screen != Screen::Vault || !is_typing(key) {
         return None;
@@ -28,7 +28,13 @@ pub async fn handle_vault_key(app: &mut App, key: &KeyEvent) -> Option<bool> {
         KeyCode::Char('S') => app.copy_sequence_step(),
         KeyCode::Char('Q') => app.open_qr(),
         KeyCode::Char('E') => app.request_notes_editor(),
-        KeyCode::Char('s') => app.cycle_sort(),
+        KeyCode::Char('s') => {
+            if app.focus == FocusPane::Folders {
+                app.open_send_form();
+            } else {
+                app.cycle_sort();
+            }
+        }
         KeyCode::Char('V') => app.open_attachments_overlay(),
         KeyCode::Char('D') => {
             if !app.busy {
