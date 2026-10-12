@@ -61,8 +61,13 @@ pub const BINDINGS: &[KeyBinding] = &[
     },
     KeyBinding {
         keys: "Enter",
-        action: "Edit login / confirm",
+        action: "Edit item / confirm",
         context: "vault · dialogs",
+    },
+    KeyBinding {
+        keys: "Shift+M",
+        action: "Move item to folder",
+        context: "vault",
     },
     KeyBinding {
         keys: "/",
@@ -76,13 +81,68 @@ pub const BINDINGS: &[KeyBinding] = &[
     },
     KeyBinding {
         keys: "n",
-        action: "New login",
+        action: "New item (login / note)",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "e / d",
+        action: "Rename / delete folder",
+        context: "folders pane",
+    },
+    KeyBinding {
+        keys: "Ctrl+a",
+        action: "Toggle password / API-key login",
+        context: "login",
+    },
+    KeyBinding {
+        keys: "m",
+        action: "Resend email 2FA",
+        context: "2FA",
+    },
+    KeyBinding {
+        keys: "Space",
+        action: "Remember this device",
+        context: "2FA",
+    },
+    KeyBinding {
+        keys: "Tab / p",
+        action: "Toggle PIN unlock",
+        context: "unlock",
+    },
+    KeyBinding {
+        keys: ",",
+        action: "Account settings",
+        context: "vault",
+    },
+    KeyBinding {
+        keys: "Shift+C",
+        action: "Clone item",
         context: "vault",
     },
     KeyBinding {
         keys: "Ctrl+n",
         action: "New folder",
         context: "vault",
+    },
+    KeyBinding {
+        keys: "Ctrl+1–9",
+        action: "Download attachment",
+        context: "detail",
+    },
+    KeyBinding {
+        keys: "Ctrl+Shift+1–9",
+        action: "Delete attachment",
+        context: "detail",
+    },
+    KeyBinding {
+        keys: "A",
+        action: "Upload attachment (path)",
+        context: "detail",
+    },
+    KeyBinding {
+        keys: "e / d / L",
+        action: "Edit / delete / copy link",
+        context: "Sends filter",
     },
     KeyBinding {
         keys: "d",

@@ -51,6 +51,7 @@ Environment overrides:
 Under the app data directory (`~/Library/Application Support/com.bitwarden-tui.bitwarden-tui/` on macOS, `~/.local/share/bitwarden-tui/` on Linux):
 
 ```text
+config.toml                   # theme, generator defaults, background sync interval, keybinding overrides (stub)
 profiles.json                 # registry + active profile
 profiles/<id>/auth.json       # profile auth metadata + cached KDF (refresh token prefers OS keychain)
 profiles/<id>/vault.cache     # UserKey-encrypted last sync (offline unlock)
@@ -62,14 +63,30 @@ Older installs with a flat `login.json` / `auth.json` are migrated once into pro
 
 | Key | Action |
 | --- | --- |
-| `/` | Fuzzy search |
+| `/` | Fuzzy search (`type:login`, `folder:work`, `name:foo`, `url:github.com`, …) |
+| `:` / Ctrl+k | Command palette |
+| `H` | Password history for selected item |
+| `R` | Vault health report |
+| `1`–`9` | Copy custom field (detail pane) |
 | `j` / `k` or `↓` / `↑` | Move selection |
 | `Tab` / `h` / `l` | Cycle pane focus |
 | `c` / `y` / `t` / `u` | Copy password / username / TOTP / URI |
+| `m` / `v` / `x` / `p` / `b` / `o` | Copy card # / CVC / expiry / SSH keys / notes (detail) |
+| `n` | New item (login or secure note) |
+| `e` / `d` (folders pane) | Rename / delete folder |
+| `Ctrl+a` (login) | Toggle password vs API-key login |
+| `m` (2FA) | Resend email verification code |
+| `Space` (2FA) | Remember this device (skip 2FA next login when server allows) |
+| `Tab` / `p` (unlock) | Toggle master password vs PIN unlock (when PIN configured) |
+| `,` | Account settings (fingerprint, password hint, change-password stub) |
+| `Shift+C` | Clone selected personal item |
+| `n` (Sends filter) | New text Send |
 | `r` | Reveal secrets in detail (15s) / restore from trash |
-| `n` / `e` / `d` / `f` | New / edit / delete / favorite |
-| `g` | Password generator |
-| `Ctrl+s` | Sync vault |
+| `n` / `e` / `d` / `f` | New item (login, note, card, identity, SSH) / edit / delete / favorite |
+| `Shift+M` | Move selected item to folder |
+| `g` | Generator (password / passphrase / username; org policy clamps options) |
+| `R` → `h` | Vault health; opt-in HIBP breach counts (network) |
+| `Ctrl+s` | Sync vault (status bar shows sync age, e.g. `Synced 5m ago`) |
 | `Ctrl+l` | Lock |
 | `Ctrl+p` | Profile manager |
 | `e` | Edit selected profile (in profile manager) |
@@ -88,12 +105,27 @@ After signing in once via the TUI (so a profile session exists):
 
 ```bash
 bitwarden-tui --profile work status
-bitwarden-tui list
+bitwarden-tui --json list --search github --type login
 bitwarden-tui get "GitHub" --field password
+bitwarden-tui get --uri https://github.com/login --field password
+bitwarden-tui totp "GitHub"
+bitwarden-tui generate --length 24
+bitwarden-tui generate --apply-org-policy   # unlock + clamp to org generator policy
 bitwarden-tui sync
+bitwarden-tui export backup.json --format json
+bitwarden-tui export encrypted.json --encrypted --password 'export-pass'
+bitwarden-tui import backup.json
+bitwarden-tui delete "Old item"
+# git / SSH helpers (after unlock):
+git -c credential.helper='!bitwarden-tui git-credential' clone …
+BW_PASSWORD=… bitwarden-tui askpass --prompt 'user@host'
 ```
 
+In the TUI, open **Account** (`,`) to set a PIN for quick unlock, change your master password, or start a profile-local **SSH agent** (Unix; requires `ssh-agent` / `ssh-add` on `PATH`). The agent stops when you lock the vault. Export `SSH_AUTH_SOCK` from the status line message for child shells.
+
 Master password is read from stdin (or `BW_PASSWORD` — discouraged). Set `BW_ALLOW_PLAINTEXT_TOKEN=1` only if OS keychain is unavailable and you accept disk-backed refresh tokens.
+
+While unlocked, the TUI runs **periodic background sync** (default every **5** minutes via `[sync] background_interval_minutes` in `config.toml`). Real-time SignalR push is not implemented; periodic sync is the supported live-update path.
 
 ## Security notes
 

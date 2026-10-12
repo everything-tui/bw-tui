@@ -37,9 +37,48 @@ pub enum Action {
     ToggleRemember,
     TogglePasswordVisibility,
     SignOutProfile,
+    OpenPasswordHistory,
+    OpenHealthReport,
+    OpenCommandPalette,
+    CloneItem,
+    MoveToFolder,
+    CopySendLink,
 }
 
 impl Action {
+    pub fn all() -> &'static [Action] {
+        use Action::*;
+        &[
+            Quit,
+            ToggleHelp,
+            OpenProfileManager,
+            Lock,
+            Sync,
+            SearchStart,
+            SearchClear,
+            MoveUp,
+            MoveDown,
+            CopyPassword,
+            CopyUsername,
+            CopyTotp,
+            CopyUri,
+            ToggleFavorite,
+            ToggleReveal,
+            NewLogin,
+            EditItem,
+            DeleteItem,
+            NewFolder,
+            OpenGenerator,
+            OpenPasswordHistory,
+            OpenHealthReport,
+            OpenCommandPalette,
+            CloneItem,
+            MoveToFolder,
+            CopySendLink,
+            SignOutProfile,
+        ]
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Quit => "Quit",
@@ -75,6 +114,12 @@ impl Action {
             Self::ToggleRemember => "Remember",
             Self::TogglePasswordVisibility => "Show/hide password",
             Self::SignOutProfile => "Sign out",
+            Self::OpenPasswordHistory => "Password history",
+            Self::OpenHealthReport => "Vault health report",
+            Self::OpenCommandPalette => "Command palette",
+            Self::CloneItem => "Clone item",
+            Self::MoveToFolder => "Move to folder",
+            Self::CopySendLink => "Copy Send link",
         }
     }
 }

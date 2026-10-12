@@ -57,7 +57,10 @@ async fn e2e_register_login_crud() {
         username: Some("alice".into()),
         password: Some("s3cret-pass".into()),
         totp: None,
-        uri: Some("https://example.com".into()),
+        uris: vec![vault_session::DecryptedUri {
+            uri: "https://example.com".into(),
+            match_type: Some(0),
+        }],
         notes: Some("integration test".into()),
         folder_id: Some(folder_id.clone()),
         favorite: true,
@@ -86,6 +89,23 @@ async fn e2e_register_login_crud() {
     let note = session.get_item(&note_id).expect("note");
     assert_eq!(note.name, "Secret Note");
     assert_eq!(note.notes.as_deref(), Some("hello world"));
+
+    // Update note
+    session
+        .update_note(
+            &note_id,
+            &NoteDraft {
+                name: "Secret Note".into(),
+                notes: Some("updated body".into()),
+                folder_id: None,
+                favorite: true,
+            },
+        )
+        .await
+        .expect("update note");
+    let note = session.get_item(&note_id).expect("note");
+    assert_eq!(note.notes.as_deref(), Some("updated body"));
+    assert!(note.favorite);
 
     // Update login
     let mut updated = draft.clone();

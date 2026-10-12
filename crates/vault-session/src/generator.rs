@@ -5,26 +5,25 @@ const LOWER: &str = "abcdefghijkmnopqrstuvwxyz";
 const UPPER: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const DIGITS: &str = "23456789";
 const SYMBOLS: &str = "!@#$%^&*-_=+?";
+/// Ambiguous characters excluded when `avoid_ambiguous` is set.
+const AMBIGUOUS: &str = "O0Il1";
 
-/// EFF-inspired short word list for passphrase mode (subset for offline use).
-const WORDLIST: &[&str] = &[
-    "acid", "acre", "also", "aqua", "arch", "area", "army", "atom", "aunt", "auto", "away", "axis",
-    "back", "bake", "ball", "band", "bank", "bark", "barn", "base", "bath", "bead", "beam", "bean",
-    "bear", "beat", "beef", "been", "bell", "belt", "best", "bike", "bill", "bind", "bird", "bite",
-    "blow", "blue", "boat", "body", "boil", "bold", "bolt", "bomb", "bond", "bone", "book", "boom",
-    "boot", "bore", "both", "bowl", "brag", "brew", "bulb", "bulk", "bull", "bump", "burn", "bush",
-    "busy", "cage", "cake", "calf", "call", "calm", "came", "camp", "card", "care", "cart", "case",
-    "cash", "cast", "cave", "cell", "chat", "chef", "chip", "city", "clam", "clan", "claw", "clay",
-    "clip", "club", "clue", "coal", "coat", "code", "coil", "coin", "cold", "colt", "coma", "comb",
-    "come", "cook", "cool", "cope", "copy", "cord", "cork", "corn", "cost", "crab", "crew", "crop",
-    "crow", "cube", "cult", "curb", "cure", "curl", "cute", "damp", "dare", "dark", "dart", "dash",
-    "data", "date", "dawn", "dead", "deal", "dear", "debt", "deck", "deep", "deer", "desk", "dial",
-    "dice", "dirt", "dish", "dock", "doll", "dome", "door", "dose", "down", "draw", "drip", "drop",
-    "drum", "dual", "duck", "duct", "duel", "duke", "dune", "dusk", "dust", "duty", "each", "earn",
-    "ease", "east", "easy", "edge", "edit", "else", "emit", "envy", "epic", "even", "ever", "evil",
-    "exam", "exit", "face", "fact", "fade", "fail", "fair", "fake", "fall", "fame", "fang", "farm",
-    "fast", "fate", "fear", "feed", "feel", "feet", "fell", "felt", "fern", "file",
-];
+/// EFF large wordlist (7776 words) embedded at compile time.
+const EFF_WORDLIST: &str = include_str!("../data/eff_large_wordlist.txt");
+
+fn wordlist() -> Vec<&'static str> {
+    EFF_WORDLIST
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            if l.is_empty() {
+                return None;
+            }
+            // EFF large wordlist lines: `11111\tword`
+            l.split('\t').nth(1).or_else(|| l.split_whitespace().last())
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeneratorOptions {
@@ -33,6 +32,9 @@ pub struct GeneratorOptions {
     pub lowercase: bool,
     pub digits: bool,
     pub symbols: bool,
+    pub avoid_ambiguous: bool,
+    pub min_numbers: usize,
+    pub min_special: usize,
 }
 
 impl Default for GeneratorOptions {
@@ -43,8 +45,18 @@ impl Default for GeneratorOptions {
             lowercase: true,
             digits: true,
             symbols: true,
+            avoid_ambiguous: false,
+            min_numbers: 1,
+            min_special: 1,
         }
     }
+}
+
+fn filter_ambiguous(s: &str, avoid: bool) -> String {
+    if !avoid {
+        return s.to_string();
+    }
+    s.chars().filter(|c| !AMBIGUOUS.contains(*c)).collect()
 }
 
 /// Generate a password with per-class guarantees using `OsRng`.
@@ -58,27 +70,34 @@ pub fn generate_password_checked(opts: GeneratorOptions) -> Result<String, Strin
         ));
     }
 
+    let lower = filter_ambiguous(LOWER, opts.avoid_ambiguous);
+    let upper = filter_ambiguous(UPPER, opts.avoid_ambiguous);
+    let digits = filter_ambiguous(DIGITS, opts.avoid_ambiguous);
+    let symbols = SYMBOLS.to_string();
+
     let mut classes: Vec<&str> = Vec::new();
-    if opts.lowercase {
-        classes.push(LOWER);
+    if opts.lowercase && !lower.is_empty() {
+        classes.push(&lower);
     }
-    if opts.uppercase {
-        classes.push(UPPER);
+    if opts.uppercase && !upper.is_empty() {
+        classes.push(&upper);
     }
-    if opts.digits {
-        classes.push(DIGITS);
+    if opts.digits && !digits.is_empty() {
+        classes.push(&digits);
     }
     if opts.symbols {
-        classes.push(SYMBOLS);
+        classes.push(&symbols);
     }
     if classes.is_empty() {
         return Err("enable at least one character class".into());
     }
-    if opts.length < classes.len() {
+
+    let min_extra = opts.min_numbers.saturating_add(opts.min_special);
+    let required = classes.len().saturating_add(min_extra.saturating_sub(classes.len().min(2)));
+    if opts.length < required.max(classes.len()) {
         return Err(format!(
-            "length {} too short for {} character classes",
-            opts.length,
-            classes.len()
+            "length {} too short for selected character classes / minimums",
+            opts.length
         ));
     }
 
@@ -91,6 +110,24 @@ pub fn generate_password_checked(opts: GeneratorOptions) -> Result<String, Strin
             chars[rng.gen_range(0..chars.len())]
         })
         .collect();
+
+    // Enforce minimum numbers / specials beyond the per-class seed char.
+    let digit_chars: Vec<char> = digits.chars().collect();
+    let symbol_chars: Vec<char> = symbols.chars().collect();
+    let mut numbers_added = if opts.digits { 1usize } else { 0 };
+    let mut specials_added = if opts.symbols { 1usize } else { 0 };
+    while opts.digits && numbers_added < opts.min_numbers && out.len() < opts.length {
+        if digit_chars.is_empty() {
+            break;
+        }
+        out.push(digit_chars[rng.gen_range(0..digit_chars.len())]);
+        numbers_added += 1;
+    }
+    while opts.symbols && specials_added < opts.min_special && out.len() < opts.length {
+        out.push(symbol_chars[rng.gen_range(0..symbol_chars.len())]);
+        specials_added += 1;
+    }
+
     while out.len() < opts.length {
         out.push(charset[rng.gen_range(0..charset.len())]);
     }
@@ -116,21 +153,92 @@ pub fn generate_password(
         lowercase,
         digits,
         symbols,
+        ..Default::default()
     };
     generate_password_checked(opts).unwrap_or_else(|_| {
-        // Fallback if all classes disabled.
         generate_password_checked(GeneratorOptions::default()).expect("defaults valid")
     })
 }
 
-/// Diceware-style passphrase from the embedded wordlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassphraseOptions {
+    pub words: usize,
+    pub capitalize: bool,
+    pub include_number: bool,
+}
+
+impl Default for PassphraseOptions {
+    fn default() -> Self {
+        Self {
+            words: 4,
+            capitalize: false,
+            include_number: false,
+        }
+    }
+}
+
+/// Diceware-style passphrase from the embedded EFF large wordlist.
 pub fn generate_passphrase(words: usize, separator: &str) -> String {
-    let n = words.clamp(3, 12);
+    generate_passphrase_opts(
+        PassphraseOptions {
+            words,
+            ..Default::default()
+        },
+        separator,
+    )
+}
+
+/// Passphrase with capitalize / include-number options (official client parity).
+pub fn generate_passphrase_opts(opts: PassphraseOptions, separator: &str) -> String {
+    let list = wordlist();
+    let n = opts.words.clamp(3, 20);
     let mut rng = OsRng;
-    (0..n)
-        .map(|_| WORDLIST[rng.gen_range(0..WORDLIST.len())])
-        .collect::<Vec<_>>()
-        .join(separator)
+    let mut parts: Vec<String> = (0..n)
+        .map(|_| {
+            let mut w = list[rng.gen_range(0..list.len())].to_string();
+            if opts.capitalize && !w.is_empty() {
+                let mut chars = w.chars();
+                if let Some(first) = chars.next() {
+                    w = format!("{}{}", first.to_ascii_uppercase(), chars.as_str());
+                }
+            }
+            w
+        })
+        .collect();
+    if opts.include_number && !parts.is_empty() {
+        let idx = rng.gen_range(0..parts.len());
+        let num: u8 = rng.gen_range(0..10);
+        parts[idx].push(char::from(b'0' + num));
+    }
+    parts.join(separator)
+}
+
+/// Random username word from the EFF wordlist.
+pub fn generate_username_word() -> String {
+    let list = wordlist();
+    let mut rng = OsRng;
+    list[rng.gen_range(0..list.len())].to_string()
+}
+
+/// Plus-addressed email: `local+tag@domain`.
+pub fn generate_username_plus_address(email: &str) -> Result<String, String> {
+    let (local, domain) = email
+        .split_once('@')
+        .ok_or_else(|| "email must contain @".to_string())?;
+    if local.is_empty() || domain.is_empty() {
+        return Err("invalid email".into());
+    }
+    let tag = generate_username_word();
+    Ok(format!("{local}+{tag}@{domain}"))
+}
+
+/// Catch-all username: `word@domain`.
+pub fn generate_username_catchall(domain: &str) -> Result<String, String> {
+    let d = domain.trim().trim_start_matches('@');
+    if d.is_empty() {
+        return Err("domain required".into());
+    }
+    Ok(format!("{}@{d}", generate_username_word()))
 }
 
 /// Approximate entropy bits for a generated password charset size.
@@ -139,6 +247,41 @@ pub fn password_entropy_bits(length: usize, charset_size: usize) -> f64 {
         return 0.0;
     }
     (length as f64) * (charset_size as f64).log2()
+}
+
+fn estimate_charset_size(password: &str) -> usize {
+    let mut classes = 0usize;
+    if password.chars().any(|c| c.is_ascii_lowercase()) {
+        classes += 26;
+    }
+    if password.chars().any(|c| c.is_ascii_uppercase()) {
+        classes += 26;
+    }
+    if password.chars().any(|c| c.is_ascii_digit()) {
+        classes += 10;
+    }
+    if password.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        classes += 32;
+    }
+    classes.max(1)
+}
+
+/// Entropy estimate for a generated or pasted password string.
+pub fn password_entropy_for_string(password: &str) -> f64 {
+    password_entropy_bits(password.len(), estimate_charset_size(password))
+}
+
+/// Rough strength label from entropy bits.
+pub fn password_strength_label(bits: f64) -> &'static str {
+    if bits < 40.0 {
+        "weak"
+    } else if bits < 60.0 {
+        "fair"
+    } else if bits < 80.0 {
+        "good"
+    } else {
+        "strong"
+    }
 }
 
 #[cfg(test)]
@@ -153,6 +296,7 @@ mod tests {
             lowercase: true,
             digits: true,
             symbols: true,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(pw.len(), 12);
@@ -175,5 +319,33 @@ mod tests {
     fn passphrase_word_count() {
         let p = generate_passphrase(5, "-");
         assert_eq!(p.split('-').count(), 5);
+    }
+
+    #[test]
+    fn eff_wordlist_loaded() {
+        assert_eq!(wordlist().len(), 7776);
+    }
+
+    #[test]
+    fn passphrase_capitalize_and_number() {
+        let p = generate_passphrase_opts(
+            PassphraseOptions {
+                words: 4,
+                capitalize: true,
+                include_number: true,
+            },
+            "-",
+        );
+        let parts: Vec<_> = p.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert!(parts.iter().any(|w| w.chars().next().unwrap().is_uppercase()));
+        assert!(p.chars().any(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn plus_address() {
+        let u = generate_username_plus_address("user@example.com").unwrap();
+        assert!(u.starts_with("user+"));
+        assert!(u.ends_with("@example.com"));
     }
 }

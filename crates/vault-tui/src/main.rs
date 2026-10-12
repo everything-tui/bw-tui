@@ -18,6 +18,7 @@ use ratatui::Terminal;
 use tracing_subscriber::EnvFilter;
 use vault_session::app_data_dir;
 use vault_tui::app::{self, App};
+use vault_tui::cli::{GenerateOpts, ListOpts};
 use vault_tui::events;
 use vault_tui::profiles::{load_registry_from, profile_has_auth};
 use vault_tui::ui::{self, PaneVisibility};
@@ -27,17 +28,86 @@ enum Commands {
     /// Print session status for a profile
     Status,
     /// Unlock and list vault items (id, type, name)
-    List,
+    List {
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long = "type")]
+        item_type: Option<String>,
+    },
     /// Unlock and print one field from an item (by id or name)
     Get {
-        /// Item id or exact name
-        query: String,
+        /// Item id or name (fuzzy; errors if ambiguous)
+        query: Option<String>,
+        /// Match login by URI / host (uses equivalent domains from sync)
+        #[arg(long)]
+        uri: Option<String>,
         /// Field to print
         #[arg(long, default_value = "password")]
         field: String,
     },
+    /// Unlock and print current TOTP for an item
+    Totp { query: String },
     /// Unlock and sync the vault
     Sync,
+    /// Generate a password or passphrase (no unlock required)
+    Generate {
+        #[arg(long, default_value_t = 20)]
+        length: usize,
+        #[arg(long)]
+        passphrase: bool,
+        #[arg(long, default_value_t = 4)]
+        words: usize,
+        #[arg(long)]
+        capitalize: bool,
+        #[arg(long)]
+        include_number: bool,
+        #[arg(long)]
+        no_uppercase: bool,
+        #[arg(long)]
+        no_lowercase: bool,
+        #[arg(long)]
+        no_digits: bool,
+        #[arg(long)]
+        no_symbols: bool,
+        #[arg(long)]
+        avoid_ambiguous: bool,
+        /// Unlock briefly and clamp options to org generator policy
+        #[arg(long)]
+        apply_org_policy: bool,
+    },
+    /// Soft-delete (or permanently delete) an item
+    Delete {
+        query: String,
+        #[arg(long)]
+        permanent: bool,
+    },
+    /// git-credential helper (`get`)
+    #[command(name = "git-credential")]
+    GitCredential,
+    /// SSH_ASKPASS / SUDO_ASKPASS helper
+    Askpass {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        prompt: Vec<String>,
+    },
+    /// Export vault to JSON or CSV (or password-protected JSON)
+    Export {
+        path: std::path::PathBuf,
+        #[arg(long, default_value = "json")]
+        format: String,
+        #[arg(long)]
+        encrypted: bool,
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Import items from a Bitwarden JSON export (plaintext or password-protected)
+    Import {
+        path: std::path::PathBuf,
+        /// Password for encrypted exports (prompted if omitted and file is encrypted)
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -62,6 +132,10 @@ struct Cli {
     /// Account email
     #[arg(long, env = "BW_EMAIL")]
     email: Option<String>,
+
+    /// Emit JSON for scripting subcommands
+    #[arg(long, global = true)]
+    json: bool,
 
     /// Use in-memory mock vault (no network) for UI testing
     #[arg(long)]
@@ -94,12 +168,114 @@ async fn run() -> Result<()> {
     }
 
     if let Some(cmd) = &cli.command {
-        let ctx = vault_tui::cli::CliCtx::load(app_data_dir(), cli.profile.clone())?;
+        // generate needs no session
+        if let Commands::Generate {
+            length,
+            passphrase,
+            words,
+            capitalize,
+            include_number,
+            no_uppercase,
+            no_lowercase,
+            no_digits,
+            no_symbols,
+            avoid_ambiguous,
+            apply_org_policy,
+        } = cmd
+        {
+            let org_policy = if *apply_org_policy {
+                let ctx =
+                    vault_tui::cli::CliCtx::load(app_data_dir(), cli.profile.clone(), cli.json)?;
+                let mut session = vault_tui::cli::unlock_session_for_generate(&ctx).await?;
+                let policy = session.generator_policy();
+                session.lock();
+                Some(policy)
+            } else {
+                None
+            };
+            vault_tui::cli::cmd_generate(
+                GenerateOpts {
+                    length: *length,
+                    passphrase: *passphrase,
+                    words: *words,
+                    capitalize: *capitalize,
+                    include_number: *include_number,
+                    no_uppercase: *no_uppercase,
+                    no_lowercase: *no_lowercase,
+                    no_digits: *no_digits,
+                    no_symbols: *no_symbols,
+                    avoid_ambiguous: *avoid_ambiguous,
+                    org_policy,
+                },
+                cli.json,
+            )?;
+            return Ok(());
+        }
+
+        let ctx = vault_tui::cli::CliCtx::load(app_data_dir(), cli.profile.clone(), cli.json)?;
         match cmd {
             Commands::Status => vault_tui::cli::cmd_status(&ctx).await?,
-            Commands::List => vault_tui::cli::cmd_list(&ctx).await?,
-            Commands::Get { query, field } => vault_tui::cli::cmd_get(&ctx, query, field).await?,
+            Commands::List {
+                search,
+                folder,
+                item_type,
+            } => {
+                vault_tui::cli::cmd_list(
+                    &ctx,
+                    ListOpts {
+                        search: search.clone(),
+                        folder: folder.clone(),
+                        item_type: item_type.clone(),
+                    },
+                )
+                .await?
+            }
+            Commands::Get {
+                query,
+                uri,
+                field,
+            } => {
+                vault_tui::cli::cmd_get(
+                    &ctx,
+                    query.as_deref(),
+                    uri.as_deref(),
+                    field,
+                )
+                .await?
+            }
+            Commands::Totp { query } => vault_tui::cli::cmd_totp(&ctx, query).await?,
             Commands::Sync => vault_tui::cli::cmd_sync(&ctx).await?,
+            Commands::Generate { .. } => unreachable!("handled above"),
+            Commands::Delete { query, permanent } => {
+                vault_tui::cli::cmd_delete(&ctx, query, *permanent).await?
+            }
+            Commands::GitCredential => vault_tui::cli::cmd_git_credential(&ctx).await?,
+            Commands::Askpass { prompt } => {
+                let joined = if prompt.is_empty() {
+                    None
+                } else {
+                    Some(prompt.join(" "))
+                };
+                vault_tui::cli::cmd_askpass(&ctx, joined).await?
+            }
+            Commands::Export {
+                path,
+                format,
+                encrypted,
+                password,
+            } => {
+                vault_tui::cli::cmd_export(
+                    &ctx,
+                    path,
+                    format,
+                    *encrypted,
+                    password.as_deref(),
+                )
+                .await?
+            }
+            Commands::Import { path, password } => {
+                vault_tui::cli::cmd_import(&ctx, path, password.as_deref()).await?
+            }
         }
         return Ok(());
     }

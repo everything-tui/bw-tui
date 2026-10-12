@@ -47,6 +47,57 @@ impl ItemType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecryptedFieldType {
+    Text,
+    Hidden,
+    Boolean,
+    Linked,
+    Unknown(u8),
+}
+
+impl DecryptedFieldType {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Text,
+            1 => Self::Hidden,
+            2 => Self::Boolean,
+            3 => Self::Linked,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Text => 0,
+            Self::Hidden => 1,
+            Self::Boolean => 2,
+            Self::Linked => 3,
+            Self::Unknown(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DecryptedField {
+    pub name: String,
+    pub value: String,
+    pub field_type: DecryptedFieldType,
+    pub linked_id: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecryptedPasswordHistory {
+    pub password: String,
+    pub last_used_date: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecryptedUri {
+    pub uri: String,
+    pub match_type: Option<i32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DecryptedItem {
     pub id: String,
@@ -54,6 +105,7 @@ pub struct DecryptedItem {
     pub item_type: ItemType,
     pub folder_id: Option<String>,
     pub organization_id: Option<String>,
+    pub collection_ids: Vec<String>,
     pub favorite: bool,
     pub deleted: bool,
     pub reprompt: bool,
@@ -61,7 +113,12 @@ pub struct DecryptedItem {
     pub username: Option<String>,
     pub password: Option<String>,
     pub totp: Option<String>,
-    pub uris: Vec<String>,
+    pub uris: Vec<DecryptedUri>,
+    pub custom_fields: Vec<DecryptedField>,
+    pub password_history: Vec<DecryptedPasswordHistory>,
+    pub password_revision_date: Option<String>,
+    pub creation_date: Option<String>,
+    pub revision_date: Option<String>,
     pub cardholder_name: Option<String>,
     pub card_brand: Option<String>,
     pub card_number: Option<String>,
@@ -70,21 +127,40 @@ pub struct DecryptedItem {
     pub card_code: Option<String>,
     pub identity_title: Option<String>,
     pub identity_first_name: Option<String>,
+    pub identity_middle_name: Option<String>,
     pub identity_last_name: Option<String>,
     pub identity_email: Option<String>,
     pub identity_phone: Option<String>,
     pub identity_username: Option<String>,
+    pub identity_address1: Option<String>,
+    pub identity_address2: Option<String>,
+    pub identity_address3: Option<String>,
+    pub identity_city: Option<String>,
+    pub identity_state: Option<String>,
+    pub identity_postal_code: Option<String>,
+    pub identity_country: Option<String>,
+    pub identity_company: Option<String>,
+    pub identity_ssn: Option<String>,
+    pub identity_passport_number: Option<String>,
+    pub identity_license_number: Option<String>,
     pub ssh_private_key: Option<String>,
     pub ssh_public_key: Option<String>,
     pub ssh_fingerprint: Option<String>,
-    pub revision_date: Option<String>,
     /// Encrypted item-level key present → edits must use that key.
     pub has_item_key: bool,
 }
 
 impl DecryptedItem {
     pub fn primary_uri(&self) -> Option<&str> {
-        self.uris.first().map(String::as_str)
+        self.uris.first().map(|u| u.uri.as_str())
+    }
+
+    pub fn uri_strings(&self) -> impl Iterator<Item = &str> {
+        self.uris.iter().map(|u| u.uri.as_str())
+    }
+
+    pub fn uri_match_types(&self) -> impl Iterator<Item = Option<i32>> + '_ {
+        self.uris.iter().map(|u| u.match_type)
     }
 
     pub fn identity_name(&self) -> Option<String> {
@@ -130,6 +206,38 @@ pub struct DecryptedFolder {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct DecryptedOrganization {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecryptedCollection {
+    pub id: String,
+    pub name: String,
+    pub organization_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecryptedSend {
+    pub id: String,
+    pub access_id: Option<String>,
+    pub name: String,
+    pub notes: Option<String>,
+    pub text: Option<String>,
+    pub send_type: u8,
+    pub disabled: bool,
+    pub deletion_date: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachmentInfo {
+    pub id: String,
+    pub file_name: String,
+    pub size_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedAuth {
     pub server_url: String,
@@ -149,6 +257,9 @@ pub struct PersistedAuth {
     pub kdf_memory: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kdf_parallelism: Option<u32>,
+    /// Remember-this-device token for skipping 2FA on future logins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub two_factor_device_token: Option<String>,
 }
 
 impl PersistedAuth {
@@ -156,7 +267,6 @@ impl PersistedAuth {
         let iterations = self.kdf_iterations?;
         Some(match self.kdf.unwrap_or(0) {
             1 => {
-                // Persist/load as MiB. Migrate legacy KiB values (>1024).
                 let raw = self
                     .kdf_memory
                     .unwrap_or(vault_crypto::ARGON2_DEFAULT_MEMORY_MIB);
@@ -187,7 +297,6 @@ impl PersistedAuth {
             } => {
                 self.kdf = Some(1);
                 self.kdf_iterations = Some(*iterations);
-                // Store MiB (API unit).
                 self.kdf_memory = Some(*memory_mib);
                 self.kdf_parallelism = Some(*parallelism);
             }
@@ -199,9 +308,13 @@ impl PersistedAuth {
 pub struct VaultIndex {
     pub folders: Vec<DecryptedFolder>,
     pub items: Vec<DecryptedItem>,
+    pub organizations: Vec<DecryptedOrganization>,
+    pub collections: Vec<DecryptedCollection>,
+    pub sends: Vec<DecryptedSend>,
     pub org_keys: HashMap<String, vault_crypto::OrgKey>,
     /// Raw encrypted ciphers from last sync (for round-trip-safe updates).
     pub raw_ciphers: HashMap<String, vault_api::Cipher>,
+    pub raw_sends: HashMap<String, vault_api::Send>,
 }
 
 /// Fields for creating/editing a login (plaintext, encrypted by session).
@@ -211,7 +324,7 @@ pub struct LoginDraft {
     pub username: Option<String>,
     pub password: Option<String>,
     pub totp: Option<String>,
-    pub uri: Option<String>,
+    pub uris: Vec<DecryptedUri>,
     pub notes: Option<String>,
     pub folder_id: Option<String>,
     pub favorite: bool,
@@ -221,6 +334,59 @@ pub struct LoginDraft {
 #[derive(Debug, Clone, Default)]
 pub struct NoteDraft {
     pub name: String,
+    pub notes: Option<String>,
+    pub folder_id: Option<String>,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CardDraft {
+    pub name: String,
+    pub cardholder_name: Option<String>,
+    pub brand: Option<String>,
+    pub number: Option<String>,
+    pub exp_month: Option<String>,
+    pub exp_year: Option<String>,
+    pub code: Option<String>,
+    pub notes: Option<String>,
+    pub folder_id: Option<String>,
+    pub favorite: bool,
+    pub reprompt: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IdentityDraft {
+    pub name: String,
+    pub title: Option<String>,
+    pub first_name: Option<String>,
+    pub middle_name: Option<String>,
+    pub last_name: Option<String>,
+    pub address1: Option<String>,
+    pub address2: Option<String>,
+    pub address3: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub company: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub ssn: Option<String>,
+    pub username: Option<String>,
+    pub passport_number: Option<String>,
+    pub license_number: Option<String>,
+    pub notes: Option<String>,
+    pub folder_id: Option<String>,
+    pub favorite: bool,
+    pub reprompt: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SshKeyDraft {
+    pub name: String,
+    pub private_key: Option<String>,
+    pub public_key: Option<String>,
+    pub fingerprint: Option<String>,
     pub notes: Option<String>,
     pub folder_id: Option<String>,
     pub favorite: bool,

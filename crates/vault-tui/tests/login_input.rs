@@ -114,6 +114,7 @@ async fn mock_switch_back_keeps_vault_when_lock_on_switch_off() {
         email: String::new(),
         auto_lock_minutes: Some(15),
         allow_plaintext_token: false,
+        clipboard_clear_secs: 30,
     });
 
     let default_id = app.active_profile_id.clone();
@@ -141,6 +142,7 @@ async fn mock_switch_away_does_not_restore_when_lock_on_switch_on() {
         email: String::new(),
         auto_lock_minutes: Some(15),
         allow_plaintext_token: false,
+        clipboard_clear_secs: 30,
     });
 
     let default_id = app.active_profile_id.clone();

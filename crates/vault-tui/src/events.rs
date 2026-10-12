@@ -3,8 +3,9 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{
-    App, ClipboardKind, EditField, FocusPane, LoginField, Overlay, PendingAction, ProfileEditField,
-    ProfileManagerMode, Screen,
+    App, CardField, ChangePasswordField, ClipboardKind, EditField, FocusPane, FormUriLine,
+    IdentityField, LoginAuthMode, LoginField, NoteField, Overlay, PendingAction, PinSetupField,
+    ProfileEditField, ProfileManagerMode, Screen, SendField, SshKeyField,
 };
 use crate::profiles::format_auto_lock_input;
 
@@ -99,6 +100,14 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
             app.remember_login = !app.remember_login;
             false
         }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.login_auth_mode = match app.login_auth_mode {
+                LoginAuthMode::Password => LoginAuthMode::ApiKey,
+                LoginAuthMode::ApiKey => LoginAuthMode::Password,
+            };
+            app.form_error = None;
+            false
+        }
         KeyCode::Char('?')
             if is_typing(&key)
                 && app.login_field != LoginField::Password
@@ -108,21 +117,11 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Tab | KeyCode::Down => {
-            app.login_field = match app.login_field {
-                LoginField::Server => LoginField::Email,
-                LoginField::Email => LoginField::Password,
-                LoginField::Password => LoginField::Remember,
-                LoginField::Remember => LoginField::Server,
-            };
+            app.login_field = cycle_login_field(app, true);
             false
         }
         KeyCode::BackTab | KeyCode::Up => {
-            app.login_field = match app.login_field {
-                LoginField::Server => LoginField::Remember,
-                LoginField::Email => LoginField::Server,
-                LoginField::Password => LoginField::Email,
-                LoginField::Remember => LoginField::Password,
-            };
+            app.login_field = cycle_login_field(app, false);
             false
         }
         KeyCode::Char(' ') if is_typing(&key) && app.login_field == LoginField::Remember => {
@@ -135,15 +134,13 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Enter => {
-            if app.login_field == LoginField::Password {
+            if matches!(
+                app.login_field,
+                LoginField::Password | LoginField::ApiKeyClientSecret
+            ) {
                 app.queue(PendingAction::Login);
             } else {
-                app.login_field = match app.login_field {
-                    LoginField::Server => LoginField::Email,
-                    LoginField::Email => LoginField::Password,
-                    LoginField::Password => LoginField::Remember,
-                    LoginField::Remember => LoginField::Server,
-                };
+                app.login_field = cycle_login_field(app, true);
             }
             false
         }
@@ -158,6 +155,12 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
                 LoginField::Password => {
                     app.password.pop();
                 }
+                LoginField::ApiKeyClientId => {
+                    app.api_client_id.pop();
+                }
+                LoginField::ApiKeyClientSecret => {
+                    app.api_client_secret.pop();
+                }
                 LoginField::Remember => {}
             }
             app.form_error = None;
@@ -168,6 +171,8 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
                 LoginField::Server => push_char(&mut app.server_url, c),
                 LoginField::Email => push_char(&mut app.email, c),
                 LoginField::Password => push_char(&mut app.password, c),
+                LoginField::ApiKeyClientId => push_char(&mut app.api_client_id, c),
+                LoginField::ApiKeyClientSecret => push_char(&mut app.api_client_secret, c),
                 LoginField::Remember => {}
             }
             app.form_error = None;
@@ -180,11 +185,19 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
 
 async fn handle_2fa(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
+        KeyCode::Char(' ') if is_typing(&key) => {
+            app.remember_2fa_device = !app.remember_2fa_device;
+            false
+        }
         KeyCode::Esc => {
             app.screen = Screen::Login;
             app.totp_code.clear();
             app.form_error = None;
             app.set_status("Cancelled 2FA");
+            false
+        }
+        KeyCode::Char('m') if is_typing(&key) => {
+            app.queue(PendingAction::ResendEmail2fa);
             false
         }
         KeyCode::Enter => {
@@ -209,6 +222,19 @@ async fn handle_2fa(app: &mut App, key: KeyEvent) -> bool {
 
 async fn handle_unlock(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
+        KeyCode::Tab | KeyCode::Char('p') if is_typing(&key) => {
+            if app
+                .session
+                .as_ref()
+                .is_some_and(|s| s.pin_unlock_available())
+            {
+                app.unlock_use_pin = !app.unlock_use_pin;
+                app.form_error = None;
+            } else if is_typing(&key) {
+                app.set_status("PIN unlock not configured");
+            }
+            false
+        }
         KeyCode::Esc => {
             app.should_quit = true;
             true
@@ -226,16 +252,30 @@ async fn handle_unlock(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Enter => {
-            app.queue(PendingAction::Unlock);
+            if app.unlock_use_pin {
+                app.queue(PendingAction::UnlockPin);
+            } else {
+                app.queue(PendingAction::Unlock);
+            }
             false
         }
         KeyCode::Backspace | KeyCode::Delete => {
-            app.unlock_password.pop();
+            if app.unlock_use_pin {
+                app.unlock_pin.pop();
+            } else {
+                app.unlock_password.pop();
+            }
             app.form_error = None;
             false
         }
         KeyCode::Char(c) if is_typing(&key) => {
-            push_char(&mut app.unlock_password, c);
+            if app.unlock_use_pin {
+                if c.is_ascii_digit() {
+                    push_char(&mut app.unlock_pin, c);
+                }
+            } else {
+                push_char(&mut app.unlock_password, c);
+            }
             app.form_error = None;
             false
         }
@@ -267,6 +307,10 @@ async fn handle_vault(
             }
             KeyCode::Char('n') => {
                 app.open_folder_form();
+                return false;
+            }
+            KeyCode::Char('k') => {
+                app.open_command_palette();
                 return false;
             }
             _ => {}
@@ -312,10 +356,26 @@ async fn handle_vault(
             }
         }
         KeyCode::Char('n') if is_typing(&key) => {
-            app.open_new_login();
+            if matches!(app.current_filter(), crate::models::FilterKind::Sends) {
+                app.open_send_form();
+            } else {
+                app.open_new_item_picker();
+            }
+        }
+        KeyCode::Char(',') if is_typing(&key) => {
+            app.open_account_settings();
+        }
+        KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::SHIFT) && is_typing(&key) => {
+            app.queue(PendingAction::CloneItem);
         }
         KeyCode::Char('e') if is_typing(&key) => {
-            app.open_edit_login();
+            if app.focus == FocusPane::Folders {
+                app.open_rename_folder_form();
+            } else if matches!(app.current_filter(), crate::models::FilterKind::Sends) {
+                app.open_edit_send();
+            } else {
+                app.open_edit_item();
+            }
         }
         KeyCode::Enter => {
             if app.in_trash() {
@@ -323,11 +383,25 @@ async fn handle_vault(
                     app.restore_selected().await;
                 }
             } else {
-                app.open_edit_login();
+                app.open_edit_item();
             }
         }
+        KeyCode::Char('M') if key.modifiers.contains(KeyModifiers::SHIFT) && is_typing(&key) => {
+            app.open_move_to_folder();
+        }
         KeyCode::Char('d') if is_typing(&key) => {
-            app.open_delete_confirm();
+            if app.focus == FocusPane::Folders {
+                app.open_delete_folder_confirm();
+            } else if matches!(app.current_filter(), crate::models::FilterKind::Sends) {
+                app.open_delete_send_confirm();
+            } else {
+                app.open_delete_confirm();
+            }
+        }
+        KeyCode::Char('L') if is_typing(&key)
+            && matches!(app.current_filter(), crate::models::FilterKind::Sends) =>
+        {
+            app.copy_send_link();
         }
         KeyCode::Char('f') if is_typing(&key) => {
             if !app.busy {
@@ -336,6 +410,20 @@ async fn handle_vault(
         }
         KeyCode::Char('g') if is_typing(&key) => {
             app.open_generator(false);
+        }
+        KeyCode::Char('H') if is_typing(&key) => {
+            app.open_password_history();
+        }
+        KeyCode::Char('R') if is_typing(&key) => {
+            app.open_health_report();
+        }
+        KeyCode::Char(':') if is_typing(&key) => {
+            app.open_command_palette();
+        }
+        KeyCode::Char(c @ '1'..='9')
+            if is_typing(&key) && app.focus == FocusPane::Detail =>
+        {
+            app.copy_custom_field((c as u8 - b'1') as usize);
         }
         KeyCode::Char('c') if is_typing(&key) => {
             app.copy_field(ClipboardKind::Password);
@@ -348,6 +436,41 @@ async fn handle_vault(
         }
         KeyCode::Char('u') if is_typing(&key) => {
             app.copy_field(ClipboardKind::Uri);
+        }
+        KeyCode::Char('m') if is_typing(&key) && app.focus == FocusPane::Detail => {
+            app.copy_field(ClipboardKind::CardNumber);
+        }
+        KeyCode::Char('v') if is_typing(&key) && app.focus == FocusPane::Detail => {
+            app.copy_field(ClipboardKind::CardCode);
+        }
+        KeyCode::Char('x') if is_typing(&key) && app.focus == FocusPane::Detail => {
+            app.copy_field(ClipboardKind::CardExpiry);
+        }
+        KeyCode::Char('p') if is_typing(&key) && app.focus == FocusPane::Detail => {
+            app.copy_field(ClipboardKind::SshPublic);
+        }
+        KeyCode::Char('b') if is_typing(&key) && app.focus == FocusPane::Detail => {
+            app.copy_field(ClipboardKind::SshPrivate);
+        }
+        KeyCode::Char(c @ '1'..='9')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.focus == FocusPane::Detail =>
+        {
+            let idx = (c as u8 - b'1') as usize;
+            app.download_attachment_at(idx).await;
+        }
+        KeyCode::Char(c @ '1'..='9')
+            if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                && app.focus == FocusPane::Detail =>
+        {
+            let idx = (c as u8 - b'1') as usize;
+            app.open_delete_attachment_confirm(idx);
+        }
+        KeyCode::Char('A') if is_typing(&key) && app.focus == FocusPane::Detail => {
+            app.open_attachment_upload();
+        }
+        KeyCode::Char('o') if is_typing(&key) && app.focus == FocusPane::Detail => {
+            app.copy_field(ClipboardKind::Notes);
         }
         KeyCode::Char('r') if is_typing(&key) => {
             if app.in_trash() {
@@ -428,11 +551,97 @@ async fn handle_overlay(app: &mut App, key: KeyEvent) -> bool {
     match &app.overlay {
         Overlay::None => false,
         Overlay::ItemForm { .. } => handle_item_form(app, key).await,
+        Overlay::NoteForm { .. } => handle_note_form(app, key).await,
+        Overlay::NewItemType { .. } => handle_new_item_type(app, key),
         Overlay::Generator { .. } => handle_generator(app, key),
         Overlay::FolderForm { .. } => handle_folder_form(app, key).await,
         Overlay::ConfirmDelete { .. } => handle_confirm_delete(app, key).await,
+        Overlay::Reprompt { .. } => handle_reprompt(app, key),
         Overlay::ProfileManager { .. } => handle_profile_manager(app, key).await,
+        Overlay::CommandPalette { .. } => handle_command_palette(app, key),
+        Overlay::PasswordHistory => handle_password_history(app, key),
+        Overlay::HealthReport { .. } => handle_health_report(app, key),
+        Overlay::AccountSettings { .. } => handle_account_settings(app, key).await,
+        Overlay::SendForm { .. } => handle_send_form(app, key).await,
+        Overlay::AttachmentPath { .. } => handle_attachment_path(app, key).await,
+        Overlay::CardForm { .. } => handle_card_form(app, key).await,
+        Overlay::IdentityForm { .. } => handle_identity_form(app, key).await,
+        Overlay::SshKeyForm { .. } => handle_ssh_key_form(app, key).await,
+        Overlay::MoveToFolder { .. } => handle_move_to_folder(app, key).await,
+        Overlay::PinSetup { .. } => handle_pin_setup(app, key),
+        Overlay::ChangeMasterPassword { .. } => handle_change_master_password(app, key).await,
     }
+}
+
+fn cycle_login_field(app: &App, forward: bool) -> LoginField {
+    if forward {
+        app.login_field.next(app.login_auth_mode)
+    } else {
+        app.login_field.prev(app.login_auth_mode)
+    }
+}
+
+fn handle_reprompt(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.close_overlay();
+            false
+        }
+        KeyCode::Enter => {
+            app.submit_reprompt();
+            false
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::Reprompt { password, error, .. } = &mut app.overlay {
+                password.pop();
+                *error = None;
+            }
+            false
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::Reprompt { password, error, .. } = &mut app.overlay {
+                push_char(password, c);
+                *error = None;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn handle_new_item_type(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.close_overlay();
+        }
+        KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') if is_typing(&key) => {
+            if let Overlay::NewItemType { selected } = &mut app.overlay {
+                *selected = (*selected + 1) % 5;
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') if is_typing(&key) => {
+            if let Overlay::NewItemType { selected } = &mut app.overlay {
+                *selected = selected.saturating_sub(1) % 5;
+            }
+        }
+        KeyCode::Enter => {
+            let selected = match &app.overlay {
+                Overlay::NewItemType { selected } => *selected,
+                _ => 0,
+            };
+            app.close_overlay();
+            match selected {
+                0 => app.open_new_login(),
+                1 => app.open_new_note(),
+                2 => app.open_new_card(),
+                3 => app.open_new_identity(),
+                4 => app.open_new_ssh_key(),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    false
 }
 
 async fn handle_profile_manager(app: &mut App, key: KeyEvent) -> bool {
@@ -532,6 +741,7 @@ async fn handle_profile_list(app: &mut App, key: KeyEvent) -> bool {
                     server_url: p.server_url,
                     email: p.email,
                     auto_lock_input: format_auto_lock_input(p.auto_lock_minutes),
+                    clipboard_clear_input: p.clipboard_clear_secs.to_string(),
                     field: ProfileEditField::Name,
                     error: None,
                 },
@@ -610,6 +820,7 @@ fn handle_profile_edit(app: &mut App, key: KeyEvent) -> bool {
                         server_url,
                         email,
                         auto_lock_input,
+                        clipboard_clear_input,
                         field,
                         error,
                         ..
@@ -630,6 +841,9 @@ fn handle_profile_edit(app: &mut App, key: KeyEvent) -> bool {
                     ProfileEditField::AutoLock => {
                         auto_lock_input.pop();
                     }
+                    ProfileEditField::ClipboardClear => {
+                        clipboard_clear_input.pop();
+                    }
                 }
                 *error = None;
             }
@@ -643,6 +857,7 @@ fn handle_profile_edit(app: &mut App, key: KeyEvent) -> bool {
                         server_url,
                         email,
                         auto_lock_input,
+                        clipboard_clear_input,
                         field,
                         error,
                         ..
@@ -657,6 +872,11 @@ fn handle_profile_edit(app: &mut App, key: KeyEvent) -> bool {
                     ProfileEditField::AutoLock => {
                         if c.is_ascii_alphanumeric() {
                             push_char(auto_lock_input, c.to_ascii_lowercase());
+                        }
+                    }
+                    ProfileEditField::ClipboardClear => {
+                        if c.is_ascii_digit() {
+                            push_char(clipboard_clear_input, c);
                         }
                     }
                 }
@@ -788,7 +1008,8 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
                 username,
                 password,
                 totp,
-                uri,
+                uris,
+                uri_line,
                 notes,
                 ..
             } = &mut app.overlay
@@ -807,12 +1028,110 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
                         totp.pop();
                     }
                     EditField::Uri => {
-                        uri.pop();
+                        if uris.is_empty() {
+                            uris.push(FormUriLine {
+                                uri: String::new(),
+                                match_type: 0,
+                            });
+                        }
+                        let idx = (*uri_line).min(uris.len().saturating_sub(1));
+                        uris[idx].uri.pop();
                     }
                     EditField::Notes => {
                         notes.pop();
                     }
+                    EditField::Reprompt => {}
                 }
+            }
+            false
+        }
+        KeyCode::Char('m') if is_typing(&key) => {
+            if let Overlay::ItemForm {
+                field: EditField::Uri,
+                uris,
+                uri_line,
+                ..
+            } = &mut app.overlay
+            {
+                if uris.is_empty() {
+                    uris.push(FormUriLine {
+                        uri: String::new(),
+                        match_type: 0,
+                    });
+                }
+                let idx = (*uri_line).min(uris.len().saturating_sub(1));
+                uris[idx].match_type = (uris[idx].match_type + 1) % 6;
+            }
+            false
+        }
+        KeyCode::Char('+') | KeyCode::Char('=') if is_typing(&key) => {
+            if let Overlay::ItemForm {
+                field: EditField::Uri,
+                uris,
+                uri_line,
+                ..
+            } = &mut app.overlay
+            {
+                uris.push(FormUriLine {
+                    uri: String::new(),
+                    match_type: 0,
+                });
+                *uri_line = uris.len().saturating_sub(1);
+            }
+            false
+        }
+        KeyCode::Char('-') | KeyCode::Char('_') if is_typing(&key) => {
+            if let Overlay::ItemForm {
+                field: EditField::Uri,
+                uris,
+                uri_line,
+                ..
+            } = &mut app.overlay
+            {
+                if uris.len() > 1 {
+                    let idx = (*uri_line).min(uris.len().saturating_sub(1));
+                    uris.remove(idx);
+                    *uri_line = (*uri_line).min(uris.len().saturating_sub(1));
+                }
+            }
+            false
+        }
+        KeyCode::Char('[') if is_typing(&key) => {
+            if let Overlay::ItemForm {
+                field: EditField::Uri,
+                uri_line,
+                uris,
+                ..
+            } = &mut app.overlay
+            {
+                if !uris.is_empty() && *uri_line > 0 {
+                    *uri_line -= 1;
+                }
+            }
+            false
+        }
+        KeyCode::Char(']') if is_typing(&key) => {
+            if let Overlay::ItemForm {
+                field: EditField::Uri,
+                uri_line,
+                uris,
+                ..
+            } = &mut app.overlay
+            {
+                if !uris.is_empty() && *uri_line + 1 < uris.len() {
+                    *uri_line += 1;
+                }
+            }
+            false
+        }
+        KeyCode::Char(' ') if is_typing(&key) => {
+            if let Overlay::ItemForm {
+                field: EditField::Reprompt,
+                reprompt,
+                ..
+            } = &mut app.overlay
+            {
+                *reprompt = !*reprompt;
             }
             false
         }
@@ -823,7 +1142,8 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
                 username,
                 password,
                 totp,
-                uri,
+                uris,
+                uri_line,
                 notes,
                 ..
             } = &mut app.overlay
@@ -833,8 +1153,71 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
                     EditField::Username => push_char(username, c),
                     EditField::Password => push_char(password, c),
                     EditField::Totp => push_char(totp, c),
-                    EditField::Uri => push_char(uri, c),
+                    EditField::Uri => {
+                        if uris.is_empty() {
+                            uris.push(FormUriLine {
+                                uri: String::new(),
+                                match_type: 0,
+                            });
+                        }
+                        let idx = (*uri_line).min(uris.len().saturating_sub(1));
+                        push_char(&mut uris[idx].uri, c);
+                    }
                     EditField::Notes => push_char(notes, c),
+                    EditField::Reprompt => {}
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+async fn handle_note_form(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+        if !app.busy {
+            app.save_note_form().await;
+        }
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            app.close_overlay();
+            false
+        }
+        KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up => {
+            if let Overlay::NoteForm { field, .. } = &mut app.overlay {
+                *field = match field {
+                    NoteField::Name => NoteField::Notes,
+                    NoteField::Notes => NoteField::Name,
+                };
+            }
+            false
+        }
+        KeyCode::Enter => {
+            if !app.busy {
+                app.save_note_form().await;
+            }
+            false
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::NoteForm { field, name, notes, .. } = &mut app.overlay {
+                match *field {
+                    NoteField::Name => {
+                        name.pop();
+                    }
+                    NoteField::Notes => {
+                        notes.pop();
+                    }
+                }
+            }
+            false
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::NoteForm { field, name, notes, .. } = &mut app.overlay {
+                match *field {
+                    NoteField::Name => push_char(name, c),
+                    NoteField::Notes => push_char(notes, c),
                 }
             }
             false
@@ -844,6 +1227,8 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn handle_generator(app: &mut App, key: KeyEvent) -> bool {
+    use crate::app::{GeneratorMode, UsernameKind};
+
     match key.code {
         KeyCode::Esc => {
             app.close_overlay();
@@ -854,39 +1239,201 @@ fn handle_generator(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('r') if is_typing(&key) => {
             app.regenerate_password();
         }
-        KeyCode::Char('+') | KeyCode::Char('=') if is_typing(&key) => {
-            if let Overlay::Generator { length, .. } = &mut app.overlay {
-                *length = (*length + 1).min(128);
+        KeyCode::Char('m') if is_typing(&key) => {
+            if let Overlay::Generator { mode, .. } = &mut app.overlay {
+                *mode = match mode {
+                    GeneratorMode::Password => GeneratorMode::Passphrase,
+                    GeneratorMode::Passphrase => GeneratorMode::Username,
+                    GeneratorMode::Username => GeneratorMode::Password,
+                };
             }
             app.regenerate_password();
+        }
+        KeyCode::Char('k') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                username_kind,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Username {
+                    *username_kind = match username_kind {
+                        UsernameKind::Word => UsernameKind::Plus,
+                        UsernameKind::Plus => UsernameKind::Catchall,
+                        UsernameKind::Catchall => UsernameKind::Word,
+                    };
+                }
+            }
+            app.regenerate_password();
+        }
+        KeyCode::Char('+') | KeyCode::Char('=') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                length,
+                passphrase_words,
+                min_numbers,
+                ..
+            } = &mut app.overlay
+            {
+                match mode {
+                    GeneratorMode::Password => *length = (*length + 1).min(128),
+                    GeneratorMode::Passphrase => *passphrase_words = (*passphrase_words + 1).min(20),
+                    GeneratorMode::Username => {}
+                }
+                if *mode == GeneratorMode::Password {
+                    *min_numbers = (*min_numbers + 1).min(10);
+                }
+            }
+            app.clamp_generator_overlay();
         }
         KeyCode::Char('-') if is_typing(&key) => {
-            if let Overlay::Generator { length, .. } = &mut app.overlay {
-                *length = (*length).saturating_sub(1).max(8);
+            if let Overlay::Generator {
+                mode,
+                length,
+                passphrase_words,
+                min_numbers,
+                ..
+            } = &mut app.overlay
+            {
+                match mode {
+                    GeneratorMode::Password => *length = (*length).saturating_sub(1).max(8),
+                    GeneratorMode::Passphrase => {
+                        *passphrase_words = (*passphrase_words).saturating_sub(1).max(3)
+                    }
+                    GeneratorMode::Username => {}
+                }
+                if *mode == GeneratorMode::Password {
+                    *min_numbers = (*min_numbers).saturating_sub(1);
+                }
             }
-            app.regenerate_password();
+            app.clamp_generator_overlay();
+        }
+        KeyCode::Char('{') if is_typing(&key) => {
+            if let Overlay::Generator { min_special, .. } = &mut app.overlay {
+                *min_special = (*min_special).saturating_sub(1);
+            }
+            app.clamp_generator_overlay();
+        }
+        KeyCode::Char('}') if is_typing(&key) => {
+            if let Overlay::Generator { min_special, .. } = &mut app.overlay {
+                *min_special = (*min_special + 1).min(10);
+            }
+            app.clamp_generator_overlay();
         }
         KeyCode::Char('u') if is_typing(&key) => {
-            if let Overlay::Generator { uppercase, .. } = &mut app.overlay {
-                *uppercase = !*uppercase;
+            if let Overlay::Generator {
+                mode,
+                uppercase,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Password {
+                    *uppercase = !*uppercase;
+                }
             }
-            app.regenerate_password();
+            app.clamp_generator_overlay();
         }
         KeyCode::Char('l') if is_typing(&key) => {
-            if let Overlay::Generator { lowercase, .. } = &mut app.overlay {
-                *lowercase = !*lowercase;
+            if let Overlay::Generator {
+                mode,
+                lowercase,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Password {
+                    *lowercase = !*lowercase;
+                }
             }
-            app.regenerate_password();
+            app.clamp_generator_overlay();
         }
         KeyCode::Char('d') if is_typing(&key) => {
-            if let Overlay::Generator { digits, .. } = &mut app.overlay {
-                *digits = !*digits;
+            if let Overlay::Generator {
+                mode,
+                digits,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Password {
+                    *digits = !*digits;
+                }
+            }
+            app.clamp_generator_overlay();
+        }
+        KeyCode::Char('s') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                symbols,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Password {
+                    *symbols = !*symbols;
+                }
+            }
+            app.clamp_generator_overlay();
+        }
+        KeyCode::Char('a') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                avoid_ambiguous,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Password {
+                    *avoid_ambiguous = !*avoid_ambiguous;
+                }
+            }
+            app.clamp_generator_overlay();
+        }
+        KeyCode::Char('C') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                passphrase_capitalize,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Passphrase {
+                    *passphrase_capitalize = !*passphrase_capitalize;
+                }
             }
             app.regenerate_password();
         }
-        KeyCode::Char('s') if is_typing(&key) => {
-            if let Overlay::Generator { symbols, .. } = &mut app.overlay {
-                *symbols = !*symbols;
+        KeyCode::Char('n') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                passphrase_include_number,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Passphrase {
+                    *passphrase_include_number = !*passphrase_include_number;
+                }
+            }
+            app.regenerate_password();
+        }
+        KeyCode::Char('w') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                passphrase_words,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Passphrase {
+                    *passphrase_words = (*passphrase_words + 1).min(20);
+                }
+            }
+            app.regenerate_password();
+        }
+        KeyCode::Char('W') if is_typing(&key) => {
+            if let Overlay::Generator {
+                mode,
+                passphrase_words,
+                ..
+            } = &mut app.overlay
+            {
+                if *mode == GeneratorMode::Passphrase {
+                    *passphrase_words = (*passphrase_words).saturating_sub(1).max(3);
+                }
             }
             app.regenerate_password();
         }
@@ -908,13 +1455,13 @@ async fn handle_folder_form(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Backspace | KeyCode::Delete => {
-            if let Overlay::FolderForm { name } = &mut app.overlay {
+            if let Overlay::FolderForm { name, .. } = &mut app.overlay {
                 name.pop();
             }
             false
         }
         KeyCode::Char(c) if is_typing(&key) => {
-            if let Overlay::FolderForm { name } = &mut app.overlay {
+            if let Overlay::FolderForm { name, .. } = &mut app.overlay {
                 push_char(name, c);
             }
             false
@@ -937,4 +1484,504 @@ async fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> bool {
         }
         _ => false,
     }
+}
+
+fn handle_command_palette(app: &mut App, key: KeyEvent) -> bool {
+    use crate::action::Action;
+    match key.code {
+        KeyCode::Esc => {
+            app.close_overlay();
+        }
+        KeyCode::Down | KeyCode::Char('j') if is_typing(&key) || key.code == KeyCode::Down => {
+            let n = app.palette_filtered_actions().len();
+            if let Overlay::CommandPalette { selected, .. } = &mut app.overlay {
+                if n > 0 {
+                    *selected = (*selected + 1) % n;
+                }
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if is_typing(&key) || key.code == KeyCode::Up => {
+            let n = app.palette_filtered_actions().len();
+            if let Overlay::CommandPalette { selected, .. } = &mut app.overlay {
+                if n > 0 {
+                    *selected = if *selected == 0 {
+                        n - 1
+                    } else {
+                        *selected - 1
+                    };
+                }
+            }
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::CommandPalette { query, selected, .. } = &mut app.overlay {
+                query.pop();
+                *selected = 0;
+            }
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::CommandPalette { query, selected, .. } = &mut app.overlay {
+                push_char(query, c);
+                *selected = 0;
+            }
+        }
+        KeyCode::Enter => {
+            let action = match &app.overlay {
+                Overlay::CommandPalette { selected, .. } => {
+                    app.palette_filtered_actions().get(*selected).cloned()
+                }
+                _ => None,
+            };
+            if let Some(action) = action {
+                let keep_open = matches!(action, Action::OpenCommandPalette);
+                app.invoke_palette_action(action);
+                if !keep_open {
+                    app.close_overlay();
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_password_history(app: &mut App, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Esc {
+        app.close_overlay();
+    }
+    false
+}
+
+fn handle_health_report(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Char('h') if is_typing(&key) => app.toggle_hibp_opt_in(),
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let Overlay::HealthReport { scroll, .. } = &mut app.overlay {
+                *scroll = scroll.saturating_add(1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let Overlay::HealthReport { scroll, .. } = &mut app.overlay {
+                *scroll = scroll.saturating_sub(1);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_account_settings(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Char('h') if is_typing(&key) => {
+            if app.using_mock {
+                if let Overlay::AccountSettings { status, .. } = &mut app.overlay {
+                    *status = "Mock mode — no server".into();
+                }
+            } else if let Some(session) = app.session.as_ref() {
+                match session.fingerprint_phrase() {
+                    Ok(p) => {
+                        if let Overlay::AccountSettings { status, .. } = &mut app.overlay {
+                            *status = format!("Fingerprint: {p}");
+                        }
+                    }
+                    Err(e) => app.set_status(format!("Fingerprint: {e}")),
+                }
+            }
+        }
+        KeyCode::Char('H') if is_typing(&key) => {
+            if let Some(session) = app.session.as_ref() {
+                match session.request_password_hint().await {
+                    Ok(()) => {
+                        if let Overlay::AccountSettings { status, .. } = &mut app.overlay {
+                            *status = "Password hint email requested".into();
+                        }
+                    }
+                    Err(e) => app.set_status(format!("Hint request failed: {e}")),
+                }
+            }
+        }
+        KeyCode::Char('p') if is_typing(&key) => {
+            app.overlay = Overlay::ChangeMasterPassword {
+                old: String::new(),
+                new: String::new(),
+                confirm: String::new(),
+                hint: String::new(),
+                field: ChangePasswordField::Old,
+                error: None,
+            };
+        }
+        KeyCode::Char('i') if is_typing(&key) => {
+            app.open_pin_setup();
+        }
+        KeyCode::Char('c') if is_typing(&key) => {
+            app.clear_pin_from_ui();
+        }
+        KeyCode::Char('s') if is_typing(&key) => {
+            app.toggle_ssh_agent();
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_pin_setup(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Enter => app.submit_pin_setup(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Overlay::PinSetup { field, .. } = &mut app.overlay {
+                *field = field.next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Overlay::PinSetup { field, .. } = &mut app.overlay {
+                *field = field.prev();
+            }
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::PinSetup { field, pin, confirm, status } = &mut app.overlay {
+                match field {
+                    PinSetupField::Pin => {
+                        pin.pop();
+                    }
+                    PinSetupField::Confirm => {
+                        confirm.pop();
+                    }
+                }
+                status.clear();
+            }
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::PinSetup { field, pin, confirm, status } = &mut app.overlay {
+                match field {
+                    PinSetupField::Pin => push_char(pin, c),
+                    PinSetupField::Confirm => push_char(confirm, c),
+                }
+                status.clear();
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_change_master_password(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::AccountSettings {
+                section: 0,
+                status: String::new(),
+            };
+        }
+        KeyCode::Enter => {
+            app.submit_change_master_password().await;
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            if let Overlay::ChangeMasterPassword { field, .. } = &mut app.overlay {
+                *field = field.next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Overlay::ChangeMasterPassword { field, .. } = &mut app.overlay {
+                *field = field.prev();
+            }
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::ChangeMasterPassword {
+                field,
+                old,
+                new,
+                confirm,
+                hint,
+                error,
+            } = &mut app.overlay
+            {
+                match field {
+                    ChangePasswordField::Old => {
+                        old.pop();
+                    }
+                    ChangePasswordField::New => {
+                        new.pop();
+                    }
+                    ChangePasswordField::Confirm => {
+                        confirm.pop();
+                    }
+                    ChangePasswordField::Hint => {
+                        hint.pop();
+                    }
+                }
+                *error = None;
+            }
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::ChangeMasterPassword {
+                field,
+                old,
+                new,
+                confirm,
+                hint,
+                error,
+            } = &mut app.overlay
+            {
+                match field {
+                    ChangePasswordField::Old => push_char(old, c),
+                    ChangePasswordField::New => push_char(new, c),
+                    ChangePasswordField::Confirm => push_char(confirm, c),
+                    ChangePasswordField::Hint => push_char(hint, c),
+                }
+                *error = None;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_send_form(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.submit_send_form().await;
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            if let Overlay::SendForm { field, .. } = &mut app.overlay {
+                *field = match field {
+                    SendField::Name => SendField::Text,
+                    SendField::Text => SendField::Name,
+                };
+            }
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::SendForm { field, name, text, .. } = &mut app.overlay {
+                match field {
+                    SendField::Name => push_char(name, c),
+                    SendField::Text => push_char(text, c),
+                }
+            }
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::SendForm { field, name, text, .. } = &mut app.overlay {
+                match field {
+                    SendField::Name => {
+                        name.pop();
+                    }
+                    SendField::Text => {
+                        text.pop();
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_attachment_path(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.submit_attachment_upload().await;
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::AttachmentPath { path } = &mut app.overlay {
+                push_char(path, c);
+            }
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if let Overlay::AttachmentPath { path } = &mut app.overlay {
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_card_form(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+        app.submit_card_form().await;
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Overlay::CardForm { field, .. } = &mut app.overlay {
+                *field = field.next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Overlay::CardForm { field, .. } = &mut app.overlay {
+                *field = field.prev();
+            }
+        }
+        KeyCode::Char(' ') if is_typing(&key) => {
+            if let Overlay::CardForm {
+                field: CardField::Reprompt,
+                reprompt,
+                ..
+            } = &mut app.overlay
+            {
+                *reprompt = !*reprompt;
+            }
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::CardForm {
+                field,
+                name,
+                cardholder_name,
+                brand,
+                number,
+                exp_month,
+                exp_year,
+                code,
+                notes,
+                ..
+            } = &mut app.overlay
+            {
+                match field {
+                    CardField::Name => push_char(name, c),
+                    CardField::Cardholder => push_char(cardholder_name, c),
+                    CardField::Brand => push_char(brand, c),
+                    CardField::Number => push_char(number, c),
+                    CardField::ExpMonth => push_char(exp_month, c),
+                    CardField::ExpYear => push_char(exp_year, c),
+                    CardField::Code => push_char(code, c),
+                    CardField::Notes => push_char(notes, c),
+                    CardField::Reprompt => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_identity_form(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+        app.submit_identity_form().await;
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Overlay::IdentityForm { field, .. } = &mut app.overlay {
+                *field = field.next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Overlay::IdentityForm { field, .. } = &mut app.overlay {
+                *field = field.prev();
+            }
+        }
+        KeyCode::Char(' ') if is_typing(&key) => {
+            if let Overlay::IdentityForm {
+                field: IdentityField::Reprompt,
+                reprompt,
+                ..
+            } = &mut app.overlay
+            {
+                *reprompt = !*reprompt;
+            }
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::IdentityForm {
+                field,
+                name,
+                title,
+                first_name,
+                last_name,
+                email,
+                phone,
+                username,
+                notes,
+                ..
+            } = &mut app.overlay
+            {
+                match field {
+                    IdentityField::Name => push_char(name, c),
+                    IdentityField::Title => push_char(title, c),
+                    IdentityField::FirstName => push_char(first_name, c),
+                    IdentityField::LastName => push_char(last_name, c),
+                    IdentityField::Email => push_char(email, c),
+                    IdentityField::Phone => push_char(phone, c),
+                    IdentityField::Username => push_char(username, c),
+                    IdentityField::Notes => push_char(notes, c),
+                    IdentityField::Reprompt => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_ssh_key_form(app: &mut App, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+        app.submit_ssh_key_form().await;
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Tab | KeyCode::Down => {
+            if let Overlay::SshKeyForm { field, .. } = &mut app.overlay {
+                *field = field.next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Overlay::SshKeyForm { field, .. } = &mut app.overlay {
+                *field = field.prev();
+            }
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            if let Overlay::SshKeyForm {
+                field,
+                name,
+                private_key,
+                public_key,
+                fingerprint,
+                notes,
+                ..
+            } = &mut app.overlay
+            {
+                match field {
+                    SshKeyField::Name => push_char(name, c),
+                    SshKeyField::PrivateKey => push_char(private_key, c),
+                    SshKeyField::PublicKey => push_char(public_key, c),
+                    SshKeyField::Fingerprint => push_char(fingerprint, c),
+                    SshKeyField::Notes => push_char(notes, c),
+                }
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+async fn handle_move_to_folder(app: &mut App, key: KeyEvent) -> bool {
+    let len = app.folders.len() + 1;
+    match key.code {
+        KeyCode::Esc => app.close_overlay(),
+        KeyCode::Enter => {
+            if !app.busy {
+                app.confirm_move_to_folder().await;
+            }
+        }
+        KeyCode::Char('j') | KeyCode::Down if is_typing(&key) || key.code == KeyCode::Down => {
+            if let Overlay::MoveToFolder { selected, .. } = &mut app.overlay {
+                *selected = (*selected + 1) % len.max(1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up if is_typing(&key) || key.code == KeyCode::Up => {
+            if let Overlay::MoveToFolder { selected, .. } = &mut app.overlay {
+                *selected = if *selected == 0 {
+                    len.saturating_sub(1)
+                } else {
+                    *selected - 1
+                };
+            }
+        }
+        _ => {}
+    }
+    false
 }

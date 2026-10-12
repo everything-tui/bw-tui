@@ -126,6 +126,26 @@ fn draw_folders(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == FocusPane::Items;
+    if matches!(app.current_filter(), FilterKind::Sends) {
+        let block = pane(" Sends ", focused);
+        let items: Vec<ListItem> = app
+            .visible_sends
+            .iter()
+            .map(|&i| {
+                let s = &app.sends[i];
+                ListItem::new(format!("{}  {}", if s.disabled { "○" } else { "●" }, s.name))
+            })
+            .collect();
+        let mut state = ListState::default().with_selected(Some(app.selected_item));
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_style(selection_style(focused)),
+            area,
+            &mut state,
+        );
+        return;
+    }
     let count = app.visible.len();
     let block = pane(" Items ", focused).title_top(
         Line::from(Span::styled(
@@ -191,6 +211,12 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, &idx)| {
             let item = &app.items[idx];
+            let org_badge = item
+                .organization_id
+                .as_ref()
+                .and_then(|id| app.org_labels.get(id))
+                .map(|n| format!(" [{n}]"))
+                .unwrap_or_default();
             let mut cells = vec![
                 Cell::from(Span::styled(
                     "●",
@@ -201,7 +227,7 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(FAV),
                 )),
                 Cell::from(Span::styled(
-                    truncate(&item.name, name_w),
+                    truncate(&format!("{}{org_badge}", item.name), name_w),
                     Style::default().fg(FG),
                 )),
             ];
@@ -266,6 +292,30 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     });
     frame.render_widget(block, area);
 
+    if matches!(app.current_filter(), FilterKind::Sends) {
+        let Some(idx) = app.visible_sends.get(app.selected_item).copied() else {
+            frame.render_widget(
+                Paragraph::new("\nSelect a send")
+                    .style(Style::default().fg(MUTED))
+                    .alignment(Alignment::Center),
+                inner,
+            );
+            return;
+        };
+        let send = &app.sends[idx];
+        let text = send.text.as_deref().unwrap_or("(empty)");
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}\n\n{text}\n\n(e edit · d delete · L copy link)",
+                send.name
+            ))
+                .wrap(Wrap { trim: false })
+                .block(Block::default()),
+            inner,
+        );
+        return;
+    }
+
     let totp_now = app.totp_display();
     let Some(item) = app.selected_decrypted() else {
         frame.render_widget(
@@ -300,6 +350,18 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(DIM_BORDER),
         )),
     ];
+    if let Some(folder) = app.folder_name_for_item(item.folder_id.as_deref()) {
+        kv(&mut lines, width, "Folder", Some(folder.as_str()), "");
+    }
+    if let Some(created) = item.creation_date.as_deref() {
+        kv(&mut lines, width, "Created", Some(created), "");
+    }
+    if item.reprompt {
+        lines.push(Line::from(Span::styled(
+            "Master password re-prompt required for sensitive actions",
+            Style::default().fg(FAV),
+        )));
+    }
 
     match item.item_type {
         ItemType::Login => {
@@ -310,15 +372,10 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                 item.password.as_deref().map(|_| "••••••••••")
             };
             kv(&mut lines, width, "Password", pw, "c");
-            let totp_label = if let Some(code) = totp_now {
-                let secs = 30u64.saturating_sub(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() % 30)
-                        .unwrap_or(0),
-                );
+            let totp_label = if let Some(display) = totp_now {
+                let secs = display.remaining;
                 if app.reveal_secrets {
-                    Some(format!("{code} ({secs}s) · r hide"))
+                    Some(format!("{} ({secs}s) · r hide", display.code))
                 } else {
                     Some(format!("•••••• ({secs}s) · r reveal · t copy"))
                 }
@@ -331,10 +388,34 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             }
             for (i, uri) in item.uris.iter().enumerate() {
                 let (label, key) = if i == 0 { ("Website", "u") } else { ("", "") };
-                kv(&mut lines, width, label, Some(uri), key);
+                let mt = uri.match_type.unwrap_or(0);
+                let display = if mt == 0 {
+                    uri.uri.clone()
+                } else {
+                    format!("{} [{}]", uri.uri, crate::app::uri_match_label(mt))
+                };
+                kv(&mut lines, width, label, Some(&display), key);
+            }
+            for (i, field) in item.custom_fields.iter().enumerate().take(9) {
+                let slot = (i + 1).to_string();
+                let value = if field.hidden && !app.reveal_secrets {
+                    Some("••••••")
+                } else if field.value.is_empty() {
+                    None
+                } else {
+                    Some(field.value.as_str())
+                };
+                kv(&mut lines, width, &field.name, value, &slot);
             }
         }
         ItemType::Card => {
+            kv(
+                &mut lines,
+                width,
+                "Cardholder",
+                item.cardholder_name.as_deref(),
+                "",
+            );
             kv(&mut lines, width, "Brand", item.card_brand.as_deref(), "");
             let masked_owned = item.card_number.as_deref().map(mask_card);
             let number = if app.reveal_secrets {
@@ -342,19 +423,80 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 masked_owned.as_deref()
             };
-            kv(&mut lines, width, "Number", number, "");
+            kv(&mut lines, width, "Number", number, "m");
             if let (Some(m), Some(y)) = (&item.card_exp_month, &item.card_exp_year) {
-                kv(&mut lines, width, "Expires", Some(&format!("{m}/{y}")), "");
+                kv(&mut lines, width, "Expires", Some(&format!("{m}/{y}")), "x");
             }
             let code = if app.reveal_secrets {
                 item.card_code.as_deref()
             } else {
                 item.card_code.as_deref().map(|_| "***")
             };
-            kv(&mut lines, width, "CVC", code, "");
+            kv(&mut lines, width, "CVC", code, "v");
         }
         ItemType::Identity => {
+            kv(&mut lines, width, "Title", item.identity_title.as_deref(), "");
             kv(&mut lines, width, "Name", item.identity_name.as_deref(), "");
+            kv(
+                &mut lines,
+                width,
+                "Email",
+                item.identity_email.as_deref(),
+                "",
+            );
+            kv(
+                &mut lines,
+                width,
+                "Phone",
+                item.identity_phone.as_deref(),
+                "",
+            );
+            kv(
+                &mut lines,
+                width,
+                "Username",
+                item.identity_username.as_deref(),
+                "",
+            );
+            kv(
+                &mut lines,
+                width,
+                "Company",
+                item.identity_company.as_deref(),
+                "",
+            );
+            let addr = [
+                item.identity_address1.as_deref(),
+                item.identity_address2.as_deref(),
+                item.identity_address3.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+            if !addr.is_empty() {
+                kv(&mut lines, width, "Address", Some(addr.as_str()), "");
+            }
+            let city_line = match (
+                item.identity_city.as_deref(),
+                item.identity_state.as_deref(),
+                item.identity_postal_code.as_deref(),
+            ) {
+                (Some(c), s, p) => Some(format!(
+                    "{c}{}{}",
+                    s.map(|x| format!(", {x}")).unwrap_or_default(),
+                    p.map(|x| format!(" {x}")).unwrap_or_default()
+                )),
+                _ => None,
+            };
+            kv(&mut lines, width, "City", city_line.as_deref(), "");
+            kv(
+                &mut lines,
+                width,
+                "Country",
+                item.identity_country.as_deref(),
+                "",
+            );
         }
         ItemType::SshKey => {
             kv(
@@ -362,8 +504,14 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                 width,
                 "Public key",
                 item.ssh_public_key.as_deref(),
-                "",
+                "p",
             );
+            let priv_key = if app.reveal_secrets {
+                item.ssh_private_key.as_deref()
+            } else {
+                item.ssh_private_key.as_ref().map(|_| "[hidden]")
+            };
+            kv(&mut lines, width, "Private key", priv_key, "b");
             kv(
                 &mut lines,
                 width,
@@ -373,6 +521,30 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             );
         }
         ItemType::SecureNote | ItemType::Unknown => {}
+    }
+
+    if !app.detail_attachments.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Attachments",
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )));
+        for (i, (_, name)) in app.detail_attachments.iter().enumerate() {
+            lines.push(Line::from(format!(
+                "  {}. {name} (Ctrl+{i} download · Ctrl+Shift+{i} delete)",
+                i + 1
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "A upload attachment path",
+            Style::default().fg(MUTED),
+        )));
+    }
+    if item.organization_id.is_some() && !app.item_editable_public(&item.id) {
+        lines.push(Line::from(Span::styled(
+            "Organization item — read-only (missing org key)",
+            Style::default().fg(DANGER),
+        )));
     }
 
     if let Some(notes) = item.notes.as_deref().filter(|n| !n.trim().is_empty()) {
@@ -522,6 +694,10 @@ fn filter_glyph(kind: &FilterKind) -> (&'static str, Color) {
         FilterKind::Folder(_) => ("▸", MUTED),
         FilterKind::NoFolder => ("▹", MUTED),
         FilterKind::Trash => ("✕", DANGER),
+        FilterKind::MyVault => ("◆", FG),
+        FilterKind::Organization(_) => ("◎", ACCENT),
+        FilterKind::Collection(_) => ("▣", MUTED),
+        FilterKind::Sends => ("➤", ACCENT),
     }
 }
 

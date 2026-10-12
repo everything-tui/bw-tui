@@ -75,6 +75,9 @@ pub struct TokenResponse {
     pub reset_master_password: Option<bool>,
     #[serde(default, rename = "UserDecryptionOptions")]
     pub user_decryption_options: Option<serde_json::Value>,
+    /// Remember-device token returned after successful 2FA when requested.
+    #[serde(default, rename = "TwoFactorToken")]
+    pub two_factor_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
@@ -98,7 +101,7 @@ pub struct SyncResponse {
     #[serde(default)]
     pub ciphers: Vec<Cipher>,
     #[serde(default)]
-    pub sends: Vec<serde_json::Value>,
+    pub sends: Vec<Send>,
     #[serde(default)]
     pub policies: Vec<serde_json::Value>,
     #[serde(default)]
@@ -181,7 +184,7 @@ pub struct Cipher {
     #[serde(default)]
     pub password_history: Option<Vec<PasswordHistoryEntry>>,
     #[serde(default)]
-    pub attachments: Option<Vec<serde_json::Value>>,
+    pub attachments: Option<Vec<CipherAttachment>>,
     #[serde(default)]
     pub organization_use_totp: Option<bool>,
     #[serde(default)]
@@ -354,7 +357,7 @@ pub struct CipherRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password_history: Option<Vec<PasswordHistoryEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<Vec<serde_json::Value>>,
+    pub attachments: Option<Vec<CipherAttachment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -422,4 +425,129 @@ pub struct RegisterSendEmailRequest {
 pub struct RegisterKeys {
     pub public_key: String,
     pub encrypted_private_key: String,
+}
+
+/// Self-service master password change (legacy Bitwarden payload).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePasswordRequest {
+    pub master_password_hash: String,
+    pub new_master_password_hash: String,
+    #[serde(rename = "key")]
+    pub user_key_encrypted: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_password_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum SendType {
+    Text = 0,
+    File = 1,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Send {
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub send_type: u8,
+    #[serde(default)]
+    pub access_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub max_access_count: Option<u32>,
+    #[serde(default)]
+    pub access_count: Option<u32>,
+    #[serde(default)]
+    pub text: Option<SendText>,
+    #[serde(default)]
+    pub file: Option<SendFile>,
+    #[serde(default)]
+    pub deletion_date: Option<String>,
+    #[serde(default)]
+    pub expiration_date: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub hide_email: bool,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SendText {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SendFile {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub size_name: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub validated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendRequest {
+    #[serde(rename = "type")]
+    pub send_type: u8,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_access_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration_date: Option<String>,
+    pub disabled: bool,
+    pub hide_email: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<SendText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<SendFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletion_date: Option<String>,
+}
+
+pub type SendResponse = Send;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CipherAttachment {
+    pub id: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub size_name: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }

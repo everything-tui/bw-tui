@@ -1,9 +1,14 @@
 //! Ratatui widgets and screens.
 
+mod account;
+mod form;
+mod health;
 mod help;
+mod history;
 mod layout;
 mod login;
 mod modals;
+mod palette;
 mod profiles;
 mod theme;
 mod vault;

@@ -66,6 +66,15 @@ impl ClipboardService {
             .map(|t| t.saturating_duration_since(Instant::now()).as_secs())
     }
 
+    /// Update auto-clear duration (values below 5 seconds are clamped to 5).
+    pub fn set_clear_after(&mut self, secs: u64) {
+        self.clear_after = Duration::from_secs(secs.max(5));
+    }
+
+    pub fn clear_after_secs(&self) -> u64 {
+        self.clear_after.as_secs()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_last_secret_for_tests(&mut self, value: String) {
         self.last_secret = Some(value);

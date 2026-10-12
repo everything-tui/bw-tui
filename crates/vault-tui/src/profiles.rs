@@ -31,6 +31,13 @@ pub struct VaultProfile {
     /// Allow storing refresh token in auth.json when OS secure storage fails.
     #[serde(default)]
     pub allow_plaintext_token: bool,
+    /// Clipboard auto-clear delay in seconds (minimum 5 when applied).
+    #[serde(default = "default_clipboard_clear_secs")]
+    pub clipboard_clear_secs: u64,
+}
+
+fn default_clipboard_clear_secs() -> u64 {
+    30
 }
 
 const REGISTRY_VERSION: u32 = 1;
@@ -67,6 +74,7 @@ impl ProfilesFile {
                 email: String::new(),
                 auto_lock_minutes: default_auto_lock_minutes(),
                 allow_plaintext_token: false,
+                clipboard_clear_secs: default_clipboard_clear_secs(),
             }],
         }
     }
@@ -284,6 +292,7 @@ fn migrate_legacy(root: &Path) -> Option<ProfilesFile> {
             email,
             auto_lock_minutes: default_auto_lock_minutes(),
             allow_plaintext_token: false,
+            clipboard_clear_secs: default_clipboard_clear_secs(),
         }],
     })
 }
@@ -322,6 +331,7 @@ pub fn create_profile(
         email: String::new(),
         auto_lock_minutes: default_auto_lock_minutes(),
         allow_plaintext_token: false,
+        clipboard_clear_secs: default_clipboard_clear_secs(),
     });
     save_registry_to(root, file)?;
     Ok(id)
@@ -367,6 +377,25 @@ pub fn format_auto_lock_label(minutes: Option<u64>) -> String {
         None => "lock off".into(),
         Some(m) => format!("lock {m}m"),
     }
+}
+
+/// Parse clipboard clear seconds (5–3600). Empty defaults to 30.
+pub fn parse_clipboard_clear_input(raw: &str) -> Result<u64, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(default_clipboard_clear_secs());
+    }
+    let n: u64 = t
+        .parse()
+        .map_err(|_| "clipboard clear must be a number of seconds".to_string())?;
+    if !(5..=3600).contains(&n) {
+        return Err("clipboard clear must be between 5 and 3600 seconds".into());
+    }
+    Ok(n)
+}
+
+pub fn format_clipboard_clear_input(secs: u64) -> String {
+    secs.to_string()
 }
 
 pub fn format_auto_lock_input(minutes: Option<u64>) -> String {

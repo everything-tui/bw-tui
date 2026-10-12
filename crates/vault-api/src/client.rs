@@ -233,7 +233,8 @@ impl VaultClient {
         &mut self,
         email: &str,
         password_hash: &str,
-        two_factor: Option<(u8, &str)>,
+        two_factor: Option<(u8, &str, bool)>,
+        remembered_device: Option<&str>,
     ) -> Result<TokenResponse> {
         let mut form = vec![
             ("grant_type", "password".to_string()),
@@ -245,10 +246,16 @@ impl VaultClient {
             ("deviceIdentifier", self.config.device_id.clone()),
             ("deviceName", self.config.device_name.clone()),
         ];
-        if let Some((provider, token)) = two_factor {
+        if let Some((provider, token, remember)) = two_factor {
             form.push(("twoFactorProvider", provider.to_string()));
             form.push(("twoFactorToken", token.to_string()));
-            form.push(("twoFactorRemember", "0".to_string()));
+            form.push((
+                "twoFactorRemember",
+                if remember { "1" } else { "0" }.to_string(),
+            ));
+        } else if let Some(device) = remembered_device {
+            form.push(("twoFactorProvider", "5".to_string()));
+            form.push(("twoFactorToken", device.to_string()));
         }
 
         let resp = self
@@ -364,6 +371,51 @@ impl VaultClient {
         Ok(token)
     }
 
+    /// Request a master password hint email for the account.
+    pub async fn request_password_hint(&self, email: &str) -> Result<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            email: &'a str,
+        }
+        let resp = self
+            .http
+            .post(self.api("/accounts/password-hint"))
+            .json(&Body { email })
+            .send()
+            .await?;
+        self.empty(resp).await
+    }
+
+    /// Change the authenticated user's master password (legacy hash + re-wrapped user key).
+    pub async fn change_password(&self, req: &ChangePasswordRequest) -> Result<()> {
+        let resp = self
+            .http
+            .post(self.api("/accounts/password"))
+            .header(AUTHORIZATION, self.bearer()?)
+            .json(req)
+            .send()
+            .await?;
+        self.empty(resp).await
+    }
+
+    /// Download attachment bytes (follows redirects; uses bearer when needed).
+    pub async fn download_bytes(&self, url: &str, use_bearer: bool) -> Result<Vec<u8>> {
+        let mut req = self.http.get(url);
+        if use_bearer {
+            req = req.header(AUTHORIZATION, self.bearer()?);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let body = resp.bytes().await?.to_vec();
+        if !status.is_success() {
+            return Err(ApiError::Api {
+                status: status.as_u16(),
+                message: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+        Ok(body)
+    }
+
     /// Ask the server to email a 2FA code (provider 1).
     pub async fn send_email_login_2fa(
         &self,
@@ -470,7 +522,6 @@ impl VaultClient {
             .http
             .get(self.api("/sync"))
             .header(AUTHORIZATION, self.bearer()?)
-            .query(&[("excludeDomains", "true")])
             .send()
             .await?;
         self.json(resp).await
@@ -595,6 +646,98 @@ impl VaultClient {
         let resp = self
             .http
             .delete(self.api(&format!("/folders/{id}")))
+            .header(AUTHORIZATION, self.bearer()?)
+            .send()
+            .await?;
+        self.empty(resp).await
+    }
+
+    /// Authenticated download URL for a cipher attachment (API redirect endpoint).
+    pub fn attachment_download_url(&self, cipher_id: &str, attachment_id: &str) -> String {
+        self.api(&format!("/ciphers/{cipher_id}/attachment/{attachment_id}"))
+    }
+
+    /// Direct attachment URL when sync already returned a signed `url` on the attachment.
+    pub fn attachment_direct_url(attachment: &CipherAttachment) -> Option<&str> {
+        attachment.url.as_deref().filter(|u| !u.is_empty())
+    }
+
+    pub async fn delete_attachment(&self, cipher_id: &str, attachment_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(self.api(&format!(
+                "/ciphers/{cipher_id}/attachment/{attachment_id}"
+            )))
+            .header(AUTHORIZATION, self.bearer()?)
+            .send()
+            .await?;
+        self.empty(resp).await
+    }
+
+    /// Upload an encrypted attachment (`POST /ciphers/{id}/attachment/v2`).
+    pub async fn upload_cipher_attachment_v2(
+        &self,
+        cipher_id: &str,
+        encrypted_key: &str,
+        encrypted_filename: &str,
+        encrypted_file: Vec<u8>,
+    ) -> Result<Cipher> {
+        use reqwest::multipart::{Form, Part};
+
+        let file_part = Part::bytes(encrypted_file)
+            .file_name(encrypted_filename.to_string())
+            .mime_str("application/octet-stream")
+            .map_err(|e| ApiError::Other(e.to_string()))?;
+        let form = Form::new()
+            .text("key", encrypted_key.to_string())
+            .part("file", file_part);
+
+        let resp = self
+            .http
+            .post(self.api(&format!("/ciphers/{cipher_id}/attachment/v2")))
+            .header(AUTHORIZATION, self.bearer()?)
+            .multipart(form)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    pub async fn create_send(&self, send: &SendRequest) -> Result<SendResponse> {
+        let resp = self
+            .http
+            .post(self.api("/sends"))
+            .header(AUTHORIZATION, self.bearer()?)
+            .json(send)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    pub async fn update_send(&self, id: &str, send: &SendRequest) -> Result<SendResponse> {
+        let resp = self
+            .http
+            .put(self.api(&format!("/sends/{id}")))
+            .header(AUTHORIZATION, self.bearer()?)
+            .json(send)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    pub async fn get_send(&self, id: &str) -> Result<SendResponse> {
+        let resp = self
+            .http
+            .get(self.api(&format!("/sends/{id}")))
+            .header(AUTHORIZATION, self.bearer()?)
+            .send()
+            .await?;
+        self.json(resp).await
+    }
+
+    pub async fn delete_send(&self, id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(self.api(&format!("/sends/{id}")))
             .header(AUTHORIZATION, self.bearer()?)
             .send()
             .await?;

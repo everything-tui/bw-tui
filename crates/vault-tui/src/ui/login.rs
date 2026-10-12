@@ -92,6 +92,7 @@ pub fn draw_login(frame: &mut Frame, app: &App) {
         rows[5],
         app.remember_login,
         app.login_field == LoginField::Remember,
+        "Remember session",
     );
 
     if app.pending.is_some() {
@@ -133,7 +134,7 @@ pub fn draw_2fa(frame: &mut Frame, app: &App) {
 
     draw_brand(frame, chunks[0], "Two-factor");
 
-    let form = center_fixed(48, 11, chunks[1]);
+    let form = center_fixed(48, 13, chunks[1]);
     let card = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -150,6 +151,7 @@ pub fn draw_2fa(frame: &mut Frame, app: &App) {
             Constraint::Length(1),
             Constraint::Length(2), // code
             Constraint::Length(1),
+            Constraint::Length(1), // remember device
             Constraint::Length(1), // message
             Constraint::Min(1),
         ])
@@ -168,20 +170,33 @@ pub fn draw_2fa(frame: &mut Frame, app: &App) {
 
     draw_input_row(frame, rows[3], "Code", &app.totp_code, true, false);
 
+    draw_remember(
+        frame,
+        rows[5],
+        app.remember_2fa_device,
+        false,
+        "Remember this device",
+    );
+
     if app.pending.is_some() {
-        draw_message(frame, rows[5], MessageKind::Busy, "Verifying…");
+        draw_message(frame, rows[6], MessageKind::Busy, "Verifying…");
     } else if let Some(err) = &app.form_error {
-        draw_message(frame, rows[5], MessageKind::Error, err);
+        draw_message(frame, rows[6], MessageKind::Error, err);
     } else {
         draw_message(
             frame,
-            rows[5],
+            rows[6],
             MessageKind::Hint,
             "Enter the code from your authenticator",
         );
     }
 
-    draw_status_bar(frame, status, app, &["Enter verify", "Esc back"]);
+    draw_status_bar(
+        frame,
+        status,
+        app,
+        &["Space remember device", "Enter verify", "Esc back"],
+    );
 }
 
 pub fn draw_unlock(frame: &mut Frame, app: &App) {
@@ -238,14 +253,18 @@ pub fn draw_unlock(frame: &mut Frame, app: &App) {
         rows[1],
     );
 
-    draw_input_row(
-        frame,
-        rows[3],
-        "Password",
-        &app.unlock_password,
-        true,
-        !app.show_password,
-    );
+    if app.unlock_use_pin {
+        draw_input_row(frame, rows[3], "PIN", &app.unlock_pin, true, false);
+    } else {
+        draw_input_row(
+            frame,
+            rows[3],
+            "Password",
+            &app.unlock_password,
+            true,
+            !app.show_password,
+        );
+    }
 
     if app.pending.is_some() {
         draw_message(frame, rows[5], MessageKind::Busy, "Unlocking…");
@@ -362,7 +381,13 @@ fn draw_input_row(
     );
 }
 
-fn draw_remember(frame: &mut Frame, area: Rect, checked: bool, focused: bool) {
+fn draw_remember(
+    frame: &mut Frame,
+    area: Rect,
+    checked: bool,
+    focused: bool,
+    label: &str,
+) {
     let fill = if focused { SELECT_BG } else { FIELD_BG };
     let marker = if focused { "▌" } else { " " };
     let box_mark = if checked { "✓" } else { " " };
@@ -377,7 +402,7 @@ fn draw_remember(frame: &mut Frame, area: Rect, checked: bool, focused: bool) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  Remember me",
+            format!("  {label}"),
             Style::default()
                 .fg(if focused { FG } else { MUTED })
                 .bg(fill),

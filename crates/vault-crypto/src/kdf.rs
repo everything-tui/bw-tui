@@ -110,6 +110,11 @@ impl MasterKey {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Construct from raw key bytes (e.g. export-file KDF output).
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 /// Server authentication hash (base64).

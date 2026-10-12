@@ -29,6 +29,7 @@ pub fn draw_profile_manager(frame: &mut Frame, app: &App) {
             server_url,
             email,
             auto_lock_input,
+            clipboard_clear_input,
             field,
             error,
             ..
@@ -38,6 +39,7 @@ pub fn draw_profile_manager(frame: &mut Frame, app: &App) {
             server_url,
             email,
             auto_lock_input,
+            clipboard_clear_input,
             *field,
             error.as_deref(),
         ),
@@ -229,17 +231,19 @@ fn draw_create(frame: &mut Frame, name: &str, error: Option<&str>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_edit(
     frame: &mut Frame,
     name: &str,
     server_url: &str,
     email: &str,
     auto_lock_input: &str,
+    clipboard_clear_input: &str,
     field: ProfileEditField,
     error: Option<&str>,
 ) {
     let area = frame.area();
-    let popup = center_fixed(60, 18, area);
+    let popup = center_fixed(60, 20, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -259,6 +263,7 @@ fn draw_edit(
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -295,18 +300,25 @@ fn draw_edit(
         auto_lock_input,
         field == ProfileEditField::AutoLock,
     );
+    draw_field(
+        frame,
+        rows[4],
+        "Clipboard clear (seconds)",
+        clipboard_clear_input,
+        field == ProfileEditField::ClipboardClear,
+    );
     if let Some(err) = error {
         frame.render_widget(
             Paragraph::new(Span::styled(err, Style::default().fg(ERR))),
-            rows[4],
+            rows[5],
         );
     } else {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                "Idle timeout before the vault locks",
+                "Idle timeout · clipboard auto-clear (min 5s when applied)",
                 Style::default().fg(MUTED),
             )),
-            rows[4],
+            rows[5],
         );
     }
 }
