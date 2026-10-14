@@ -182,7 +182,7 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " Tab · Ctrl+s save · URI: m match · +/- lines · [/] line · Esc ",
+            " Tab · Ctrl+s save · URI: ^t match · ^n add · ^d del · ^b/^f line · Esc ",
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);

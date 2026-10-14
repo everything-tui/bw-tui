@@ -1342,7 +1342,7 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
             }
             false
         }
-        KeyCode::Char('m') if is_typing(&key) => {
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Overlay::ItemForm {
                 field: EditField::Uri,
                 uris,
@@ -1361,7 +1361,7 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
             }
             false
         }
-        KeyCode::Char('+') | KeyCode::Char('=') if is_typing(&key) => {
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Overlay::ItemForm {
                 field: EditField::Uri,
                 uris,
@@ -1377,7 +1377,7 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
             }
             false
         }
-        KeyCode::Char('-') | KeyCode::Char('_') if is_typing(&key) => {
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Overlay::ItemForm {
                 field: EditField::Uri,
                 uris,
@@ -1393,7 +1393,7 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
             }
             false
         }
-        KeyCode::Char('[') if is_typing(&key) => {
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Overlay::ItemForm {
                 field: EditField::Uri,
                 uri_line,
@@ -1407,7 +1407,7 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
             }
             false
         }
-        KeyCode::Char(']') if is_typing(&key) => {
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Overlay::ItemForm {
                 field: EditField::Uri,
                 uri_line,
@@ -1421,7 +1421,16 @@ async fn handle_item_form(app: &mut App, key: KeyEvent) -> bool {
             }
             false
         }
-        KeyCode::Char(' ') if is_typing(&key) => {
+        KeyCode::Char(' ')
+            if is_typing(&key)
+                && matches!(
+                    &app.overlay,
+                    Overlay::ItemForm {
+                        field: EditField::Reprompt,
+                        ..
+                    }
+                ) =>
+        {
             if let Overlay::ItemForm {
                 field: EditField::Reprompt,
                 reprompt,
@@ -2223,7 +2232,16 @@ async fn handle_card_form(app: &mut App, key: KeyEvent) -> bool {
                 *field = field.prev();
             }
         }
-        KeyCode::Char(' ') if is_typing(&key) => {
+        KeyCode::Char(' ')
+            if is_typing(&key)
+                && matches!(
+                    &app.overlay,
+                    Overlay::CardForm {
+                        field: CardField::Reprompt,
+                        ..
+                    }
+                ) =>
+        {
             if let Overlay::CardForm {
                 field: CardField::Reprompt,
                 reprompt,
@@ -2282,7 +2300,16 @@ async fn handle_identity_form(app: &mut App, key: KeyEvent) -> bool {
                 *field = field.prev();
             }
         }
-        KeyCode::Char(' ') if is_typing(&key) => {
+        KeyCode::Char(' ')
+            if is_typing(&key)
+                && matches!(
+                    &app.overlay,
+                    Overlay::IdentityForm {
+                        field: IdentityField::Reprompt,
+                        ..
+                    }
+                ) =>
+        {
             if let Overlay::IdentityForm {
                 field: IdentityField::Reprompt,
                 reprompt,
