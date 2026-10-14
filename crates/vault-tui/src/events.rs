@@ -142,11 +142,7 @@ async fn handle_login(app: &mut App, key: KeyEvent) -> bool {
             app.form_error = None;
             false
         }
-        KeyCode::Char('?')
-            if is_typing(&key)
-                && app.login_field != LoginField::Password
-                && app.login_field != LoginField::Remember =>
-        {
+        KeyCode::F(1) => {
             app.show_help = true;
             app.help_scroll = 0;
             false
@@ -257,7 +253,7 @@ async fn handle_2fa(app: &mut App, key: KeyEvent) -> bool {
 
 async fn handle_unlock(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
-        KeyCode::Tab | KeyCode::Char('p') if is_typing(&key) => {
+        KeyCode::Tab => {
             if app
                 .session
                 .as_ref()
@@ -282,7 +278,7 @@ async fn handle_unlock(app: &mut App, key: KeyEvent) -> bool {
             app.sign_out_current_profile();
             false
         }
-        KeyCode::Char('?') if is_typing(&key) => {
+        KeyCode::F(1) => {
             app.show_help = true;
             app.help_scroll = 0;
             false
@@ -659,7 +655,7 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
             }
             app.close_overlay();
         }
-        KeyCode::Char('n') if is_typing(&key) => {
+        KeyCode::Char('n') if is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. }) => {
             if let Overlay::CustomFieldsForm {
                 editing,
                 edit_name,
@@ -678,7 +674,7 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
         }
-        KeyCode::Char('d') if is_typing(&key) => {
+        KeyCode::Char('d') if is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. }) => {
             if let Overlay::CustomFieldsForm {
                 fields,
                 selected,
@@ -748,7 +744,9 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
         }
-        KeyCode::Down | KeyCode::Char('j') if is_typing(&key) || key.code == KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j')
+            if key.code == KeyCode::Down || (is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. })) =>
+        {
             if let Overlay::CustomFieldsForm {
                 fields,
                 selected,
@@ -761,7 +759,9 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
         }
-        KeyCode::Up | KeyCode::Char('k') if is_typing(&key) || key.code == KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k')
+            if key.code == KeyCode::Up || (is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. })) =>
+        {
             if let Overlay::CustomFieldsForm {
                 fields,
                 selected,
@@ -1795,7 +1795,7 @@ fn handle_command_palette(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Esc => {
             app.close_overlay();
         }
-        KeyCode::Down | KeyCode::Char('j') if is_typing(&key) || key.code == KeyCode::Down => {
+        KeyCode::Down => {
             let n = app.palette_filtered_actions().len();
             if let Overlay::CommandPalette { selected, .. } = &mut app.overlay {
                 if n > 0 {
@@ -1803,7 +1803,7 @@ fn handle_command_palette(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
         }
-        KeyCode::Up | KeyCode::Char('k') if is_typing(&key) || key.code == KeyCode::Up => {
+        KeyCode::Up => {
             let n = app.palette_filtered_actions().len();
             if let Overlay::CommandPalette { selected, .. } = &mut app.overlay {
                 if n > 0 {
