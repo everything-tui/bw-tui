@@ -182,15 +182,20 @@ async fn watchtower_badge_appears_after_tick() {
 async fn mouse_click_selects_item_and_wheel_scrolls() {
     let mut app = mock_vault().await;
     app.config.mouse = true;
-    app.power.view_size.set((120, 40));
     assert!(app.visible.len() >= 3);
 
-    // Layout at 120x40: folders 22 cols, items next. Click inside the items pane, 3rd data row
-    // (top border + header + two rows).
+    // Draw a frame first (the real loop always does): clicks hit-test against it.
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+    term.draw(|f| vault_tui::ui::draw(f, &app)).unwrap();
+    let (row, column) = {
+        let hit = app.hitmap.borrow();
+        let row = hit.item_rows.iter().find(|(_, i)| *i == 2).unwrap().0;
+        (row, hit.layout.items.x + 6)
+    };
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 30,
-        row: 4,
+        column,
+        row,
         modifiers: KeyModifiers::NONE,
     };
     handle_event(&mut app, Event::Mouse(click), true, true).await;
@@ -199,8 +204,8 @@ async fn mouse_click_selects_item_and_wheel_scrolls() {
 
     let wheel = MouseEvent {
         kind: MouseEventKind::ScrollUp,
-        column: 30,
-        row: 4,
+        column,
+        row,
         modifiers: KeyModifiers::NONE,
     };
     handle_event(&mut app, Event::Mouse(wheel), true, true).await;

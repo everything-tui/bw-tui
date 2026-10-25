@@ -149,6 +149,7 @@ pub enum Action {
     ReceiveSend,
     // App
     OpenGenerator,
+    ChangeTheme,
     OpenHealthReport,
     DomainRules,
     AccountSettings,
@@ -226,6 +227,7 @@ impl Action {
             CopySendLink,
             ReceiveSend,
             OpenGenerator,
+            ChangeTheme,
             OpenHealthReport,
             DomainRules,
             AccountSettings,
@@ -302,6 +304,7 @@ impl Action {
             CopySendLink => "Copy Send link",
             ReceiveSend => "Open a Send link",
             OpenGenerator => "Password generator",
+            ChangeTheme => "Change theme",
             OpenHealthReport => "Vault health report",
             DomainRules => "Domain rules",
             AccountSettings => "Account settings",
@@ -332,9 +335,9 @@ impl Action {
             | Attachments | UploadAttachment | PasswordHistory | ShowQr | AutoType
             | AutoTypeTotp | CycleSort | Restore | EmptyTrash => Group::Item,
             NewSend | CopySendLink | ReceiveSend => Group::Sends,
-            OpenGenerator | OpenHealthReport | DomainRules | AccountSettings | NewFolder | Sync
-            | Lock | OpenProfileManager | SignOutProfile | OpenCommandPalette | ToggleHelp
-            | Quit => Group::App,
+            OpenGenerator | ChangeTheme | OpenHealthReport | DomainRules | AccountSettings
+            | NewFolder | Sync | Lock | OpenProfileManager | SignOutProfile
+            | OpenCommandPalette | ToggleHelp | Quit => Group::App,
         }
     }
 

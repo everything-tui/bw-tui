@@ -33,9 +33,9 @@ pub fn split_vault_panes(area: Rect) -> (Option<Rect>, Rect, Option<Rect>) {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Length(22),
-                    Constraint::Min(24),
-                    Constraint::Percentage(38),
+                    Constraint::Length(26),
+                    Constraint::Min(30),
+                    Constraint::Percentage(40),
                 ])
                 .split(area);
             (Some(cols[0]), cols[1], Some(cols[2]))
@@ -43,7 +43,7 @@ pub fn split_vault_panes(area: Rect) -> (Option<Rect>, Rect, Option<Rect>) {
         (true, false) => {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(22), Constraint::Min(20)])
+                .constraints([Constraint::Length(24), Constraint::Min(20)])
                 .split(area);
             (Some(cols[0]), cols[1], None)
         }
@@ -56,6 +56,45 @@ pub fn split_vault_panes(area: Rect) -> (Option<Rect>, Rect, Option<Rect>) {
         }
         (false, false) => (None, area, None),
     }
+}
+
+/// Header row, three panes, status row.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VaultLayout {
+    pub header: Rect,
+    pub folders: Option<Rect>,
+    pub items: Rect,
+    pub detail: Option<Rect>,
+    pub status: Rect,
+}
+
+pub fn vault_layout(area: Rect) -> VaultLayout {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let (folders, items, detail) = split_vault_panes(rows[1]);
+    VaultLayout {
+        header: rows[0],
+        folders,
+        items,
+        detail,
+        status: rows[2],
+    }
+}
+
+/// Where things were drawn last frame, for mouse hit-testing.
+#[derive(Debug, Clone, Default)]
+pub struct HitMap {
+    pub layout: VaultLayout,
+    /// Screen row → sidebar entry index.
+    pub sidebar_rows: Vec<(u16, usize)>,
+    /// Screen row → item (or Send) index in the visible list.
+    pub item_rows: Vec<(u16, usize)>,
 }
 
 /// Vertical split: body + status bar.

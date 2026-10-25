@@ -3,18 +3,14 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, CardField, ChangePasswordField, Overlay, PinSetupField};
+use crate::ui::chrome;
 use crate::ui::form::draw_form_field;
 use crate::ui::layout::center_fixed;
-use ratatui::style::Color;
-
-const ACCENT: Color = Color::Rgb(175, 82, 222);
-const FG: Color = Color::White;
-const MUTED: Color = Color::DarkGray;
-const ERR: Color = Color::Rgb(255, 100, 100);
+use crate::ui::theme::pal;
 
 pub fn draw_account_settings(frame: &mut Frame, app: &App) {
     let Overlay::AccountSettings { status, .. } = &app.overlay else {
@@ -22,76 +18,97 @@ pub fn draw_account_settings(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(68, 18, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Account ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " h fp · H hint · p pw · i PIN · c clr · s ssh · a more · Esc ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Account ",
+        " h fp · H hint · p pw · i PIN · c clr · s ssh · a more · Esc ",
+    );
     let lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::styled(
                 "h",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal::accent())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Show fingerprint phrase", Style::default().fg(FG)),
+            Span::styled(
+                "  Show fingerprint phrase",
+                Style::default().fg(pal::text()),
+            ),
         ]),
         Line::from(vec![
             Span::styled(
                 "H",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal::accent())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Email master password hint", Style::default().fg(FG)),
+            Span::styled(
+                "  Email master password hint",
+                Style::default().fg(pal::text()),
+            ),
         ]),
         Line::from(vec![
             Span::styled(
                 "p",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal::accent())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Change master password", Style::default().fg(FG)),
+            Span::styled("  Change master password", Style::default().fg(pal::text())),
         ]),
         Line::from(vec![
             Span::styled(
                 "i",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal::accent())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Set / update PIN unlock", Style::default().fg(FG)),
+            Span::styled(
+                "  Set / update PIN unlock",
+                Style::default().fg(pal::text()),
+            ),
         ]),
         Line::from(vec![
             Span::styled(
                 "c",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal::accent())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Clear PIN unlock", Style::default().fg(FG)),
+            Span::styled("  Clear PIN unlock", Style::default().fg(pal::text())),
         ]),
         Line::from(vec![
             Span::styled(
                 "s",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal::accent())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Start / stop vault SSH agent", Style::default().fg(FG)),
+            Span::styled(
+                "  Start / stop vault SSH agent",
+                Style::default().fg(pal::text()),
+            ),
         ]),
         Line::from(vec![
             Span::styled(
                 "a",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal::accent())
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "  Account tools (KDF, sessions, 2FA, devices, aliases)",
-                Style::default().fg(FG),
+                Style::default().fg(pal::text()),
             ),
         ]),
         Line::from(""),
-        Line::from(Span::styled(status.as_str(), Style::default().fg(MUTED))),
+        Line::from(Span::styled(
+            status.as_str(),
+            Style::default().fg(pal::muted()),
+        )),
     ];
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
 }
@@ -108,17 +125,12 @@ pub fn draw_pin_setup(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(52, 12, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(" PIN unlock ")
-        .title_bottom(Span::styled(
-            " Tab fields · Enter save · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " PIN unlock ",
+        " Tab fields · Enter save · Esc cancel ",
+    );
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -145,7 +157,7 @@ pub fn draw_pin_setup(frame: &mut Frame, app: &App) {
     );
     if !status.is_empty() {
         frame.render_widget(
-            Paragraph::new(status.as_str()).style(Style::default().fg(MUTED)),
+            Paragraph::new(status.as_str()).style(Style::default().fg(pal::muted())),
             rows[2],
         );
     }
@@ -165,17 +177,12 @@ pub fn draw_change_master_password(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(54, 16, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(" Change master password ")
-        .title_bottom(Span::styled(
-            " Tab fields · Enter submit · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Change master password ",
+        " Tab fields · Enter submit · Esc cancel ",
+    );
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -220,7 +227,7 @@ pub fn draw_change_master_password(frame: &mut Frame, app: &App) {
     );
     if let Some(err) = error {
         frame.render_widget(
-            Paragraph::new(err.as_str()).style(Style::default().fg(ERR)),
+            Paragraph::new(err.as_str()).style(Style::default().fg(pal::danger())),
             rows[4],
         );
     }
@@ -238,7 +245,6 @@ pub fn draw_send_form(frame: &mut Frame, app: &App) {
     } else {
         center_fixed(64, 20, area)
     };
-    frame.render_widget(Clear, popup);
     let title = if form.editing_id.is_some() {
         " Edit Send "
     } else if quick {
@@ -251,13 +257,7 @@ pub fn draw_send_form(frame: &mut Frame, app: &App) {
     } else {
         " Tab · Ctrl+t type · Enter/Ctrl+s save · Esc "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(title)
-        .title_bottom(Span::styled(footer, Style::default().fg(MUTED)));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(frame, popup, title, footer);
     let kind = match form.kind {
         SendKind::Text => "Text",
         SendKind::File => "File",
@@ -279,12 +279,12 @@ pub fn draw_send_form(frame: &mut Frame, app: &App) {
     } else {
         "••••••••"
     };
-    let on = |b: bool| if b { "x" } else { " " };
+    let _on = |b: bool| if b { "x" } else { " " };
     let row = |label: &str, value: &str, active: bool| {
         let style = if active {
-            Style::default().fg(ACCENT)
+            Style::default().fg(pal::accent())
         } else {
-            Style::default().fg(FG)
+            Style::default().fg(pal::text())
         };
         Line::from(Span::styled(format!("{label:<12} {value}"), style))
     };
@@ -328,17 +328,17 @@ pub fn draw_send_form(frame: &mut Frame, app: &App) {
             ),
             row(
                 "Hide email",
-                &format!("[{}]", on(form.hide_email)),
+                chrome::check(form.hide_email),
                 form.field == SendFormField::HideEmail,
             ),
             row(
                 "Hide text",
-                &format!("[{}]", on(form.hidden_text)),
+                chrome::check(form.hidden_text),
                 form.field == SendFormField::HiddenText,
             ),
             row(
                 "Disabled",
-                &format!("[{}]", on(form.disabled)),
+                chrome::check(form.disabled),
                 form.field == SendFormField::Disabled,
             ),
         ]);
@@ -347,7 +347,7 @@ pub fn draw_send_form(frame: &mut Frame, app: &App) {
     if let Some(err) = &form.error {
         out.push(Line::from(Span::styled(
             err.clone(),
-            Style::default().fg(ERR),
+            Style::default().fg(pal::danger()),
         )));
     }
     frame.render_widget(Paragraph::new(out), inner);
@@ -360,17 +360,12 @@ pub fn draw_receive_send(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(64, 16, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(" Open Send link ")
-        .title_bottom(Span::styled(
-            " Enter fetch/save · c copy · r reveal · Esc ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Open Send link ",
+        " Enter fetch/save · c copy · r reveal · Esc ",
+    );
     let mut lines = vec![
         Line::from(Span::styled(
             format!(
@@ -383,9 +378,9 @@ pub fn draw_receive_send(frame: &mut Frame, app: &App) {
                 state.url
             ),
             Style::default().fg(if state.field == ReceiveField::Url {
-                ACCENT
+                pal::accent()
             } else {
-                FG
+                pal::text()
             }),
         )),
         Line::from(Span::styled(
@@ -403,9 +398,9 @@ pub fn draw_receive_send(frame: &mut Frame, app: &App) {
                 }
             ),
             Style::default().fg(if state.field == ReceiveField::Password {
-                ACCENT
+                pal::accent()
             } else {
-                FG
+                pal::text()
             }),
         )),
     ];
@@ -439,14 +434,14 @@ pub fn draw_receive_send(frame: &mut Frame, app: &App) {
                     },
                     state.save_path
                 ),
-                Style::default().fg(ACCENT),
+                Style::default().fg(pal::accent()),
             )));
         }
     }
     if let Some(msg) = &state.message {
         lines.push(Line::from(Span::styled(
             msg.clone(),
-            Style::default().fg(MUTED),
+            Style::default().fg(pal::muted()),
         )));
     }
     frame.render_widget(Paragraph::new(lines), inner);
@@ -471,22 +466,12 @@ pub fn draw_card_form(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(58, 22, area);
-    frame.render_widget(Clear, popup);
     let title = if editing_id.is_some() {
         " Edit card "
     } else {
         " New card "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(title)
-        .title_bottom(Span::styled(
-            " Tab · Ctrl+s save · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(frame, popup, title, " Tab · Ctrl+s save · Esc cancel ");
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -564,9 +549,9 @@ pub fn draw_card_form(frame: &mut Frame, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(reprompt_label).style(if *field == CardField::Reprompt {
-            Style::default().fg(ACCENT)
+            Style::default().fg(pal::accent())
         } else {
-            Style::default().fg(MUTED)
+            Style::default().fg(pal::muted())
         }),
         rows[8],
     );

@@ -145,6 +145,7 @@ fn default_keys(action: Action) -> &'static [&'static str] {
         CopySendLink => &["c", "L"],
         ReceiveSend => &["o"],
         OpenGenerator => &["P"],
+        ChangeTheme => &["Ctrl+t"],
         OpenHealthReport => &["R"],
         DomainRules => &["D"],
         AccountSettings => &[","],
@@ -202,6 +203,7 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "sort" => Action::CycleSort,
         "qr" => Action::ShowQr,
         "settings" => Action::AccountSettings,
+        "theme" => Action::ChangeTheme,
         _ => return None,
     })
 }

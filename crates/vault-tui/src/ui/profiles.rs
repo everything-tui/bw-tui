@@ -3,20 +3,15 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use vault_session::TimeoutAction;
 
 use crate::app::{App, Overlay, ProfileEditField, ProfileManagerMode};
 use crate::profiles::{format_auto_lock_label, profile_has_auth};
+use crate::ui::chrome;
 use crate::ui::layout::center_fixed;
-
-const ACCENT: Color = Color::Rgb(175, 82, 222);
-const MUTED: Color = Color::DarkGray;
-const FG: Color = Color::White;
-const ERR: Color = Color::LightRed;
-const SELECT: Color = Color::Rgb(40, 40, 55);
-const OPEN: Color = Color::Rgb(80, 200, 120);
+use crate::ui::theme::pal;
 
 pub fn draw_profile_manager(frame: &mut Frame, app: &App) {
     let Overlay::ProfileManager { selected, mode } = &app.overlay else {
@@ -68,33 +63,25 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize) {
     };
     let height = (body_h + 4).clamp(10, 22);
     let popup = center_fixed(68, height, area);
-    frame.render_widget(Clear, popup);
 
     let lock_switch = if app.profiles.lock_on_profile_switch {
         "on"
     } else {
         "off"
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Profiles ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            format!(
-                " Enter switch · n new · e edit · d delete · L lock-on-switch: {lock_switch} · Esc "
-            ),
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Profiles ",
+        format!(
+            " Enter switch · n new · e edit · d delete · L lock-on-switch: {lock_switch} · Esc "
+        ),
+    );
 
     if app.profiles.profiles.is_empty() {
         frame.render_widget(
             Paragraph::new("No profiles")
-                .style(Style::default().fg(MUTED))
+                .style(Style::default().fg(pal::muted()))
                 .alignment(Alignment::Center),
             inner,
         );
@@ -125,16 +112,21 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize) {
         let is_sel = i == selected;
         let is_active = p.id == app.active_profile_id;
         let is_open = app.profile_is_open(&p.id);
-        let bg = if is_sel { SELECT } else { Color::Reset };
-        let name_style = Style::default()
-            .fg(FG)
-            .bg(bg)
-            .add_modifier(if is_sel || is_active {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
-        let meta_style = Style::default().fg(MUTED).bg(bg);
+        let bg = if is_sel {
+            pal::select_bg()
+        } else {
+            pal::overlay()
+        };
+        let name_style =
+            Style::default()
+                .fg(pal::text())
+                .bg(bg)
+                .add_modifier(if is_sel || is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+        let meta_style = Style::default().fg(pal::muted()).bg(bg);
 
         let marker = if is_active { "●" } else { " " };
         let saved = if profile_has_auth(&app.data_root, &p.id) {
@@ -169,7 +161,7 @@ fn draw_list(frame: &mut Frame, app: &App, selected: usize) {
             if rest > 0 {
                 let badge = "open";
                 let badge_style = Style::default()
-                    .fg(OPEN)
+                    .fg(pal::success())
                     .bg(bg)
                     .add_modifier(Modifier::BOLD);
                 if badge.len() <= rest {
@@ -211,21 +203,7 @@ fn pad_line(s: &str, width: usize) -> String {
 fn draw_create(frame: &mut Frame, name: &str, error: Option<&str>) {
     let area = frame.area();
     let popup = center_fixed(56, 10, area);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " New profile ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Enter save · Esc back ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(frame, popup, " New profile ", " Enter save · Esc back ");
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -235,7 +213,7 @@ fn draw_create(frame: &mut Frame, name: &str, error: Option<&str>) {
     draw_field(frame, rows[0], "Name", name, true);
     if let Some(err) = error {
         frame.render_widget(
-            Paragraph::new(Span::styled(err, Style::default().fg(ERR))),
+            Paragraph::new(Span::styled(err, Style::default().fg(pal::danger()))),
             rows[1],
         );
     }
@@ -275,16 +253,20 @@ fn draw_toggle(
 ) {
     let marker = if focused { "▸ " } else { "  " };
     let label_style = if focused {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(pal::accent())
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(MUTED)
+        Style::default().fg(pal::muted())
     };
     let line = Line::from(vec![
         Span::styled(marker, label_style),
         Span::styled(format!("{label}: "), label_style),
         Span::styled(
             format!("[{value}]"),
-            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal::text())
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -293,21 +275,12 @@ fn draw_toggle(
 fn draw_edit(frame: &mut Frame, v: EditView<'_>, field: ProfileEditField, error: Option<&str>) {
     let area = frame.area();
     let popup = center_fixed(64, 25, area);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Edit profile ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Tab fields · Space/←/→ toggle · Enter save · Esc back ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Edit profile ",
+        " Tab fields · Space/←/→ toggle · Enter save · Esc back ",
+    );
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -382,7 +355,7 @@ fn draw_edit(frame: &mut Frame, v: EditView<'_>, field: ProfileEditField, error:
     );
     if let Some(err) = error {
         frame.render_widget(
-            Paragraph::new(Span::styled(err, Style::default().fg(ERR)))
+            Paragraph::new(Span::styled(err, Style::default().fg(pal::danger())))
                 .wrap(ratatui::widgets::Wrap { trim: true }),
             rows[8],
         );
@@ -391,7 +364,7 @@ fn draw_edit(frame: &mut Frame, v: EditView<'_>, field: ProfileEditField, error:
             .policy_note
             .unwrap_or_else(|| "Idle timeout · clipboard auto-clear (min 5s when applied)".into());
         frame.render_widget(
-            Paragraph::new(Span::styled(hint, Style::default().fg(MUTED)))
+            Paragraph::new(Span::styled(hint, Style::default().fg(pal::muted())))
                 .wrap(ratatui::widgets::Wrap { trim: true }),
             rows[8],
         );
@@ -401,7 +374,6 @@ fn draw_edit(frame: &mut Frame, v: EditView<'_>, field: ProfileEditField, error:
 fn draw_confirm_delete(frame: &mut Frame, app: &App, id: &str, name: &str) {
     let area = frame.area();
     let popup = center_fixed(54, 9, area);
-    frame.render_widget(Clear, popup);
 
     let has_auth = profile_has_auth(&app.data_root, id);
     let warn = if has_auth {
@@ -410,25 +382,18 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App, id: &str, name: &str) {
         "Delete this profile?"
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ERR))
-        .title(Span::styled(
-            " Delete profile ",
-            Style::default().fg(ERR).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " y confirm · n / Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Delete profile ",
+        " y confirm · n / Esc cancel ",
+    );
 
     let text = format!("Delete “{name}”?\n{warn}");
     frame.render_widget(
         Paragraph::new(text)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(FG)),
+            .style(Style::default().fg(pal::text())),
         inner,
     );
 }
@@ -440,18 +405,10 @@ fn draw_field(
     value: &str,
     focused: bool,
 ) {
-    let border = if focused { ACCENT } else { MUTED };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border))
-        .title(Span::styled(
-            format!(" {label} "),
-            Style::default().fg(border),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let _border = if focused { pal::accent() } else { pal::muted() };
+    let inner = chrome::modal(frame, area, format!(" {label} "), "");
     frame.render_widget(
-        Paragraph::new(value.to_string()).style(Style::default().fg(FG)),
+        Paragraph::new(value.to_string()).style(Style::default().fg(pal::text())),
         inner,
     );
 }

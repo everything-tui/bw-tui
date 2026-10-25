@@ -2,17 +2,18 @@
 
 mod account;
 mod account_tools;
+pub mod chrome;
 mod form;
 mod health;
 mod help;
 mod history;
-pub(crate) mod layout;
+pub mod layout;
 mod login;
 mod modals;
 mod palette;
 mod power;
 mod profiles;
-mod theme;
+pub mod theme;
 mod vault;
 
 pub use theme::{init_theme, theme, CustomThemeColors};
@@ -32,6 +33,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Screen::AuthWait => login::draw_auth_wait(frame, app),
         Screen::Unlock => login::draw_unlock(frame, app),
         Screen::Vault => vault::draw_vault(frame, app),
+    }
+
+    if !matches!(app.overlay, Overlay::None) || app.show_help {
+        chrome::dim_backdrop(frame.buffer_mut(), area);
     }
 
     if !matches!(app.overlay, Overlay::None) {

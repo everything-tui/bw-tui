@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use vault_session::{DomainRules, RecentMap, SessionStatus};
 use zeroize::Zeroize;
 
@@ -1189,7 +1189,12 @@ impl App {
         if w == 0 || h == 0 {
             return;
         }
-        let (folders, items, detail) = self.pane_rects(Rect::new(0, 0, w, h));
+        let hitmap = self.hitmap.borrow().clone();
+        let (folders, items, detail) = (
+            hitmap.layout.folders,
+            hitmap.layout.items,
+            hitmap.layout.detail,
+        );
         let pos = (ev.column, ev.row);
         let hit = |r: Rect| {
             pos.0 >= r.x && pos.0 < r.x + r.width && pos.1 >= r.y && pos.1 < r.y + r.height
@@ -1206,6 +1211,9 @@ impl App {
         let Some(pane) = pane else {
             return;
         };
+        // Rows the last frame drew for this pane: screen y → index.
+        let row_at =
+            |rows: &[(u16, usize)]| rows.iter().find(|(y, _)| *y == ev.row).map(|(_, i)| *i);
 
         match ev.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -1214,19 +1222,20 @@ impl App {
                 } else {
                     1
                 };
-                // Scrolling over the detail pane scrolls the item list (same as j/k there).
-                self.focus = pane;
-                self.move_selection_clamped(delta);
+                if pane == FocusPane::Detail {
+                    self.focus = pane;
+                    self.scroll_detail(Some(delta));
+                } else {
+                    self.focus = pane;
+                    self.move_selection_clamped(delta);
+                }
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.focus = pane;
                 match pane {
                     FocusPane::Folders => {
-                        if let Some(r) = folders {
-                            let row = ev.row.saturating_sub(r.y + 1) as usize;
-                            let viewport = r.height.saturating_sub(2) as usize;
-                            let idx = scroll_offset(self.selected_sidebar, viewport) + row;
-                            if ev.row > r.y && idx < self.sidebar.len() {
+                        if let Some(idx) = row_at(&hitmap.sidebar_rows) {
+                            if idx != self.selected_sidebar {
                                 self.selected_sidebar = idx;
                                 self.selected_item = 0;
                                 self.recompute_visible();
@@ -1235,24 +1244,12 @@ impl App {
                         }
                     }
                     FocusPane::Items => {
-                        let sends = matches!(self.current_filter(), FilterKind::Sends);
-                        let (header, len) = if sends {
-                            (1u16, self.visible_sends.len())
-                        } else {
-                            (2u16, self.visible.len())
-                        };
-                        // Items table: top border + header row; sends list: top border only.
-                        let chrome = items.height.saturating_sub(header + 1) as usize;
-                        if ev.row >= items.y + header && len > 0 {
-                            let row = (ev.row - items.y - header) as usize;
-                            let idx = scroll_offset(self.selected_item.min(len - 1), chrome) + row;
-                            if idx < len {
-                                let prev = self.selected_id();
-                                self.selected_item = idx;
-                                if self.selected_id() != prev {
-                                    self.reprompt_ok_for = None;
-                                    self.refresh_detail_attachments();
-                                }
+                        if let Some(idx) = row_at(&hitmap.item_rows) {
+                            let prev = self.selected_id();
+                            self.selected_item = idx;
+                            if self.selected_id() != prev {
+                                self.reprompt_ok_for = None;
+                                self.refresh_detail_attachments();
                             }
                         }
                     }
@@ -1284,29 +1281,6 @@ impl App {
             return;
         }
         self.move_selection(delta);
-    }
-
-    fn pane_rects(&self, area: Rect) -> (Option<Rect>, Rect, Option<Rect>) {
-        use crate::ui::layout::{split_status, split_vault_panes};
-        let (body, _status) = split_status(area);
-        let panes = if self.searching || !self.search_query.is_empty() {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(1)])
-                .split(body)[1]
-        } else {
-            body
-        };
-        split_vault_panes(panes)
-    }
-}
-
-/// Ratatui keeps the selection visible by scrolling just enough from offset 0.
-fn scroll_offset(selected: usize, viewport: usize) -> usize {
-    if viewport == 0 {
-        0
-    } else {
-        (selected + 1).saturating_sub(viewport)
     }
 }
 
@@ -1366,13 +1340,5 @@ mod tests {
         assert_eq!(SortMode::Modified.next(), SortMode::Name);
         assert_eq!(SortMode::parse("Recent"), SortMode::Recent);
         assert_eq!(SortMode::parse("zzz"), SortMode::Name);
-    }
-
-    #[test]
-    fn scroll_offsets() {
-        assert_eq!(scroll_offset(0, 10), 0);
-        assert_eq!(scroll_offset(9, 10), 0);
-        assert_eq!(scroll_offset(10, 10), 1);
-        assert_eq!(scroll_offset(5, 0), 0);
     }
 }

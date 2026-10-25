@@ -509,6 +509,7 @@ pub async fn dispatch(app: &mut App, action: Action, panes: Panes, quit_armed: b
 
         // --- App ---
         Action::OpenGenerator => app.open_generator(false),
+        Action::ChangeTheme => app.open_theme_picker(),
         Action::OpenHealthReport => app.open_health_report(),
         Action::DomainRules => {
             if !app.busy {
@@ -588,6 +589,7 @@ async fn handle_overlay(app: &mut App, key: KeyEvent) -> bool {
     }
     match &app.overlay {
         Overlay::None => false,
+        Overlay::ThemePicker { .. } => handle_theme_picker(app, key),
         Overlay::Power(_) => crate::power_events::handle_power_overlay(app, key).await,
         Overlay::ItemForm { .. } => handle_item_form(app, key).await,
         Overlay::NoteForm { .. } => handle_note_form(app, key).await,
@@ -614,6 +616,19 @@ async fn handle_overlay(app: &mut App, key: KeyEvent) -> bool {
         Overlay::ChangeMasterPassword { .. } => handle_change_master_password(app, key).await,
         Overlay::CustomFieldsForm { .. } => handle_custom_fields_form(app, key).await,
     }
+}
+
+fn handle_theme_picker(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Down | KeyCode::Tab => app.theme_picker_move(1),
+        KeyCode::Up | KeyCode::BackTab => app.theme_picker_move(-1),
+        KeyCode::Char('j') if is_typing(&key) => app.theme_picker_move(1),
+        KeyCode::Char('k') if is_typing(&key) => app.theme_picker_move(-1),
+        KeyCode::Enter => app.theme_picker_confirm(),
+        KeyCode::Esc | KeyCode::Char('q') => app.theme_picker_cancel(),
+        _ => {}
+    }
+    false
 }
 
 async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {

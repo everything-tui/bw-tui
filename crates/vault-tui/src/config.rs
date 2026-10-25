@@ -1,5 +1,6 @@
 //! User preferences loaded from `config.toml` under the app data directory.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,9 @@ pub struct AppConfig {
     /// Optional RGB color overrides for the active theme.
     #[serde(default)]
     pub colors: ThemeColorConfig,
+    /// Let the terminal background show through the main panes.
+    #[serde(default)]
+    pub transparent_background: bool,
     /// Per-action keybinding overrides.
     #[serde(default)]
     pub keybindings: KeybindingOverrides,
@@ -79,54 +83,38 @@ fn default_sort() -> String {
     "name".into()
 }
 
+/// `[colors]`: per-token overrides on top of the selected theme, e.g.
+/// `accent = "#ff79c6"`. Any name in `ui::theme::TOKEN_NAMES` is accepted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThemeColorConfig {
-    pub accent: Option<String>,
-    pub accent_dim: Option<String>,
-    pub text: Option<String>,
-    pub muted: Option<String>,
-    pub danger: Option<String>,
-    pub success: Option<String>,
-    pub warning: Option<String>,
-    pub border: Option<String>,
-    pub border_focused: Option<String>,
-    pub digit: Option<String>,
-    pub symbol: Option<String>,
+    #[serde(flatten)]
+    pub tokens: BTreeMap<String, String>,
 }
 
 impl ThemeColorConfig {
-    pub fn to_custom(&self) -> CustomThemeColors {
+    pub fn to_custom(&self, transparent: bool) -> CustomThemeColors {
+        let mut overrides = Vec::new();
+        for (name, value) in &self.tokens {
+            if !crate::ui::theme::TOKEN_NAMES.contains(&name.as_str()) {
+                tracing::warn!("[colors]: unknown token '{name}'");
+                continue;
+            }
+            match parse_rgb(Some(value)) {
+                Some(c) => overrides.push((name.clone(), c)),
+                None => tracing::warn!("[colors]: invalid color '{value}' for '{name}'"),
+            }
+        }
         CustomThemeColors {
-            accent: parse_rgb(self.accent.as_deref()),
-            accent_dim: parse_rgb(self.accent_dim.as_deref()),
-            text: parse_rgb(self.text.as_deref()),
-            muted: parse_rgb(self.muted.as_deref()),
-            danger: parse_rgb(self.danger.as_deref()),
-            success: parse_rgb(self.success.as_deref()),
-            warning: parse_rgb(self.warning.as_deref()),
-            border: parse_rgb(self.border.as_deref()),
-            border_focused: parse_rgb(self.border_focused.as_deref()),
-            digit: parse_rgb(self.digit.as_deref()),
-            symbol: parse_rgb(self.symbol.as_deref()),
+            overrides,
+            transparent,
         }
     }
 
     pub fn has_any(&self) -> bool {
-        self.accent.is_some()
-            || self.accent_dim.is_some()
-            || self.text.is_some()
-            || self.muted.is_some()
-            || self.danger.is_some()
-            || self.success.is_some()
-            || self.warning.is_some()
-            || self.border.is_some()
-            || self.border_focused.is_some()
-            || self.digit.is_some()
-            || self.symbol.is_some()
+        !self.tokens.is_empty()
     }
 }
 
-/// Parse `"#rrggbb"` or `"r,g,b"` into an RGB triple.
 fn parse_rgb(s: Option<&str>) -> Option<(u8, u8, u8)> {
     let s = s?.trim();
     if let Some(hex) = s.strip_prefix('#') {
@@ -229,6 +217,7 @@ impl Default for AppConfig {
         Self {
             theme: default_theme(),
             colors: ThemeColorConfig::default(),
+            transparent_background: false,
             keybindings: KeybindingOverrides::default(),
             generator: GeneratorConfig::default(),
             sync: SyncConfig::default(),
@@ -298,6 +287,17 @@ pub fn save_config(root: &Path, config: &AppConfig) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colors_table_accepts_any_token() {
+        let cfg: AppConfig = toml::from_str(
+            "theme = \"nord\"\ntransparent_background = true\n[colors]\naccent = \"#ff0000\"\nsurface = \"1, 2, 3\"\n",
+        )
+        .unwrap();
+        let custom = cfg.colors.to_custom(cfg.transparent_background);
+        assert!(custom.transparent);
+        assert_eq!(custom.overrides.len(), 2);
+    }
 
     #[test]
     fn parse_hex_and_csv_rgb() {

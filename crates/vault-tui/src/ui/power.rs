@@ -3,22 +3,14 @@
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, AttachmentPreview, DomainInput, Overlay, PowerOverlay};
 use crate::toast::ToastKind;
+use crate::ui::chrome;
 use crate::ui::layout::center_fixed;
 use crate::ui::theme::theme;
-
-fn popup_block(title: &str, hint: &str) -> Block<'static> {
-    let t = theme();
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(t.focused_border())
-        .title(Span::styled(format!(" {title} "), t.title()))
-        .title_bottom(Span::styled(format!(" {hint} "), t.muted_style()))
-}
 
 pub fn draw_power_overlay(frame: &mut Frame, app: &App) {
     let Overlay::Power(p) = &app.overlay else {
@@ -54,7 +46,6 @@ fn draw_qr(frame: &mut Frame, p: &PowerOverlay) {
     let width = (qr_w + 4).max(46);
     let height = (qr_h + 7).max(9);
     let popup = center_fixed(width, height, area);
-    frame.render_widget(Clear, popup);
 
     let kind = entries
         .get(*index)
@@ -65,12 +56,12 @@ fn draw_qr(frame: &mut Frame, p: &PowerOverlay) {
     } else {
         ""
     };
-    let block = popup_block(
-        &format!("QR · {item_name} · {kind}"),
-        &format!("{multi}Esc close (auto-closes in 60s)"),
+    let inner = chrome::modal(
+        frame,
+        popup,
+        format!("QR · {item_name} · {kind}"),
+        format!("{multi}Esc close (auto-closes in 60s)"),
     );
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
 
     let mut out: Vec<Line> = Vec::new();
     out.push(Line::from(Span::styled(
@@ -114,13 +105,12 @@ fn draw_attachments(frame: &mut Frame, p: &PowerOverlay) {
     }
     let height = (items.len() as u16 + 4).clamp(6, 18);
     let popup = center_fixed(64, height, area);
-    frame.render_widget(Clear, popup);
-    let block = popup_block(
+    let inner = chrome::modal(
+        frame,
+        popup,
         "Attachments",
         "Enter open · p preview · s save · d delete · a upload · Esc close",
     );
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
     let lines: Vec<Line> = items
         .iter()
         .enumerate()
@@ -143,10 +133,12 @@ fn draw_preview(frame: &mut Frame, area: Rect, pv: &AttachmentPreview) {
         area.height.saturating_sub(4).min(30),
         area,
     );
-    frame.render_widget(Clear, popup);
-    let block = popup_block(&format!("Preview · {}", pv.name), "j/k scroll · p/Esc back");
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        format!("Preview · {}", pv.name),
+        "j/k scroll · p/Esc back",
+    );
     if let Some(note) = &pv.note {
         frame.render_widget(
             Paragraph::new(note.clone())
@@ -181,18 +173,17 @@ fn draw_domain_rules(frame: &mut Frame, p: &PowerOverlay) {
     let t = theme();
     let area = frame.area();
     let popup = center_fixed(76.min(area.width), 24.min(area.height), area);
-    frame.render_widget(Clear, popup);
     let title = if *dirty {
         "Domain rules (modified)"
     } else {
         "Domain rules"
     };
-    let block = popup_block(
+    let inner = chrome::modal(
+        frame,
+        popup,
         title,
         "a add · e edit · d delete · x toggle global · s save · Esc close",
     );
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
 
     let mut rows: Vec<Line> = Vec::new();
     rows.push(Line::from(Span::styled(
@@ -231,7 +222,7 @@ fn draw_domain_rules(frame: &mut Frame, p: &PowerOverlay) {
         } else {
             t.normal()
         };
-        let mark = if g.excluded { "[ ]" } else { "[x]" };
+        let mark = chrome::check(!g.excluded);
         rows.push(Line::from(Span::styled(
             format!("  {mark} {}", g.domains.join(", ")),
             style,
@@ -290,13 +281,12 @@ fn draw_ssh_confirm(frame: &mut Frame, p: &PowerOverlay) {
     let area = frame.area();
     let height = (keys.len() as u16 + 8).clamp(9, 20);
     let popup = center_fixed(64, height, area);
-    frame.render_widget(Clear, popup);
-    let block = popup_block(
+    let inner = chrome::modal(
+        frame,
+        popup,
         "Start SSH agent?",
         "t toggle confirm-each-use · y start · n/Esc cancel",
     );
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
@@ -340,9 +330,9 @@ pub fn draw_toasts(frame: &mut Frame, app: &App) {
         return;
     }
     let max_w = area.width.saturating_sub(2).min(52);
-    let mut y = area.y + 1;
+    let mut y = area.y + 2;
     for toast in app.power.toasts.iter_newest_first() {
-        if y + 3 > area.y + area.height {
+        if y + 1 > area.y + area.height {
             break;
         }
         let color = match toast.kind {
@@ -351,10 +341,10 @@ pub fn draw_toasts(frame: &mut Frame, app: &App) {
             ToastKind::Warning => t.warning,
             ToastKind::Error => t.danger,
         };
-        let text_w = toast.text.chars().count() as u16 + 6;
-        let w = text_w.clamp(14, max_w);
+        let text_w = toast.text.chars().count() as u16 + 7;
+        let w = text_w.clamp(16, max_w);
         let x = area.x + area.width.saturating_sub(w + 1);
-        let rect = Rect::new(x, y, w, 3);
+        let rect = Rect::new(x, y, w, 1);
         let glyph = if t.ascii {
             match toast.kind {
                 ToastKind::Info => "i",
@@ -365,28 +355,26 @@ pub fn draw_toasts(frame: &mut Frame, app: &App) {
         } else {
             toast.kind.glyph()
         };
-        let avail = w.saturating_sub(6) as usize;
+        let avail = w.saturating_sub(7) as usize;
         let mut text: String = toast.text.chars().take(avail).collect();
         if toast.text.chars().count() > avail && avail > 1 {
             text.pop();
             text.push('…');
         }
-        frame.render_widget(Clear, rect);
+        // One-line pill: colored edge, icon, message, on the popup surface.
+        let bg = chrome::raised(t.overlay);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled(if t.ascii { "|" } else { "▌" }, Style::default().fg(color)),
                 Span::styled(
-                    format!("{glyph} "),
+                    format!(" {glyph}  "),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(text, t.normal()),
+                Span::styled(text, Style::default().fg(t.text)),
             ]))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(color)),
-            ),
+            .style(Style::default().bg(bg)),
             rect,
         );
-        y += 3;
+        y += 2;
     }
 }

@@ -362,6 +362,11 @@ struct MockParked {
 #[allow(clippy::large_enum_variant)]
 pub enum Overlay {
     None,
+    /// Live theme switcher; `original` is restored on Esc.
+    ThemePicker {
+        selected: usize,
+        original: String,
+    },
     /// P4 power-user overlays (QR, attachments, domain rules, SSH agent confirmation).
     Power(crate::app::PowerOverlay),
     ItemForm {
@@ -876,6 +881,8 @@ pub struct App {
     /// Detail pane scroll (j/k while it has focus), keyed by item id so a new
     /// selection starts at the top.
     pub detail_scroll: (Option<String>, u16),
+    /// Geometry of the last drawn vault frame (mouse hit-testing).
+    pub hitmap: std::cell::RefCell<crate::ui::layout::HitMap>,
     /// Largest useful detail scroll, measured at draw time.
     pub detail_scroll_max: std::cell::Cell<u16>,
     /// `g` was pressed; the next key picks a go-to target.
@@ -967,12 +974,10 @@ impl App {
         let auto_lock_minutes = active.auto_lock_minutes;
         let clipboard_clear_secs = active.clipboard_clear_secs;
         let config = load_config_from(&data_root);
-        let custom = if config.colors.has_any() {
-            Some(config.colors.to_custom())
-        } else {
-            None
-        };
-        init_theme(&config.theme, custom.as_ref());
+        init_theme(
+            &config.theme,
+            Some(&config.colors.to_custom(config.transparent_background)),
+        );
         let keymap = KeyMap::resolve(&config.keybindings);
         for w in &keymap.warnings {
             tracing::warn!("keybinding: {w}");
@@ -1053,6 +1058,7 @@ impl App {
             pending_undo: None,
             detail_scroll: (None, 0),
             detail_scroll_max: std::cell::Cell::new(0),
+            hitmap: Default::default(),
             pending_goto: false,
             quit_armed: false,
             last_auto_sync: Instant::now(),
@@ -2428,6 +2434,12 @@ impl App {
         ];
 
         entries.extend(nested_folder_entries(&self.folders));
+        let no_folder = active(&|i| !i.deleted && i.folder_id.is_none());
+        entries.push(SidebarEntry {
+            label: "No folder".into(),
+            kind: FilterKind::NoFolder,
+            count: no_folder,
+        });
 
         if !self.org_labels.is_empty() {
             for (id, name) in &self.org_labels {
@@ -2462,12 +2474,6 @@ impl App {
             count: send_count,
         });
 
-        let no_folder = active(&|i| !i.deleted && i.folder_id.is_none());
-        entries.push(SidebarEntry {
-            label: "No folder".into(),
-            kind: FilterKind::NoFolder,
-            count: no_folder,
-        });
         entries.push(SidebarEntry {
             label: "Trash".into(),
             kind: FilterKind::Trash,
@@ -2754,6 +2760,15 @@ impl App {
             self.last_synced_at = Some(Local::now());
         }
         self.last_auto_sync = Instant::now();
+    }
+
+    /// Compact sync state for the header: `"synced 2m"`, `"offline"`.
+    pub fn sync_badge(&self) -> Option<String> {
+        if self.session_is_offline() {
+            return Some("offline".into());
+        }
+        self.last_synced_at
+            .map(|t| format!("synced {}", format_sync_age(t).trim_end_matches(" ago")))
     }
 
     fn last_synced_status(&self) -> Option<String> {
@@ -4628,6 +4643,68 @@ impl App {
             .iter()
             .find(|f| f.id.as_deref() == Some(id))
             .map(|f| f.name.clone())
+    }
+
+    pub fn open_theme_picker(&mut self) {
+        use crate::ui::theme::THEME_NAMES;
+        let current = self.config.theme.to_ascii_lowercase();
+        let selected = THEME_NAMES.iter().position(|n| *n == current).unwrap_or(0);
+        self.overlay = Overlay::ThemePicker {
+            selected,
+            original: self.config.theme.clone(),
+        };
+        self.touch();
+    }
+
+    /// Apply a theme by name, keeping `[colors]` overrides and transparency.
+    pub fn apply_theme(&self, name: &str) {
+        crate::ui::init_theme(
+            name,
+            Some(
+                &self
+                    .config
+                    .colors
+                    .to_custom(self.config.transparent_background),
+            ),
+        );
+    }
+
+    /// Move the picker selection and preview the theme live.
+    pub fn theme_picker_move(&mut self, delta: isize) {
+        use crate::ui::theme::THEME_NAMES;
+        let Overlay::ThemePicker { selected, .. } = &mut self.overlay else {
+            return;
+        };
+        let n = THEME_NAMES.len() as isize;
+        *selected = (*selected as isize + delta).rem_euclid(n) as usize;
+        let name = THEME_NAMES[*selected];
+        self.apply_theme(name);
+        self.touch();
+    }
+
+    /// Keep the previewed theme and write it to config.toml.
+    pub fn theme_picker_confirm(&mut self) {
+        use crate::ui::theme::THEME_NAMES;
+        let Overlay::ThemePicker { selected, .. } = &self.overlay else {
+            return;
+        };
+        let name = THEME_NAMES[*selected].to_string();
+        self.overlay = Overlay::None;
+        self.config.theme = name.clone();
+        self.apply_theme(&name);
+        match crate::config::save_config(&self.data_root, &self.config) {
+            Ok(()) => self.set_status(format!("Theme: {name} (saved to config.toml)")),
+            Err(e) => self.set_status(format!("Theme: {name} (not saved: {e})")),
+        }
+    }
+
+    /// Esc: restore the theme that was active when the picker opened.
+    pub fn theme_picker_cancel(&mut self) {
+        if let Overlay::ThemePicker { original, .. } = &self.overlay {
+            let original = original.clone();
+            self.apply_theme(&original);
+        }
+        self.overlay = Overlay::None;
     }
 
     pub fn open_command_palette(&mut self) {

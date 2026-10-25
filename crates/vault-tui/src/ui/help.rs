@@ -4,16 +4,16 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::action::{Action, Group, GOTO_TARGETS};
 use crate::app::{App, Screen};
 use crate::keymap::{HelpSection, BINDINGS};
 use crate::ui::layout::center_fixed;
-use crate::ui::theme;
+use crate::ui::{chrome, theme};
 
-const KEY_W: usize = 24;
+const KEY_W: usize = 26;
 
 pub fn draw_help(frame: &mut Frame, app: &App) {
     let t = theme();
@@ -21,18 +21,12 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
     let height = area.height.saturating_sub(2).clamp(12, 40);
     let popup = center_fixed(80, height, area);
 
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(t.focused_border())
-        .title(Span::styled(" Help ", t.title()))
-        .title_bottom(Span::styled(
-            " j/k scroll · Space/PgDn page · Esc close ",
-            t.muted_style(),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Help ",
+        " j/k scroll · Space/PgDn page · Esc close ",
+    );
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -63,20 +57,36 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
 fn heading(title: &str) -> Line<'static> {
     let t = theme();
     Line::from(Span::styled(
-        format!("── {title} ──"),
+        format!("  {}", title.to_uppercase()),
         Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
     ))
 }
 
+/// `keys` like `"j / ↓"` become keycaps; the action label follows in a column.
 fn row(keys: String, action: &str) -> Line<'static> {
     let t = theme();
-    Line::from(vec![
-        Span::styled(
-            format!("  {keys:<KEY_W$}"),
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(action.to_string(), t.normal()),
-    ])
+    let mut spans = vec![Span::raw("  ")];
+    let mut used = 2;
+    if keys == "palette" {
+        let s = Span::styled("palette", Style::default().fg(t.muted));
+        used += s.width();
+        spans.push(s);
+    } else {
+        for (i, k) in keys.split(" / ").enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+                used += 1;
+            }
+            let cap = chrome::keycap(k.trim(), t.overlay);
+            used += cap.width();
+            spans.push(cap);
+        }
+    }
+    spans.push(Span::raw(
+        " ".repeat((KEY_W + 2).saturating_sub(used).max(1)),
+    ));
+    spans.push(Span::styled(action.to_string(), t.normal()));
+    Line::from(spans)
 }
 
 fn static_section(lines: &mut Vec<Line<'static>>, section: HelpSection) {
@@ -154,34 +164,28 @@ pub fn draw_goto_hint(frame: &mut Frame, app: &App) {
     let t = theme();
     let area = frame.area();
     let rows = GOTO_TARGETS.len() as u16 + 2;
-    let width = 26;
+    let width = 24;
     if area.height < rows + 2 || area.width < width + 2 {
         return;
     }
-    // Bottom-right, just above the status bar.
+    // Bottom-right, just above the status bar (inside the panel's padding).
     let popup = Rect::new(
-        area.right() - width - 1,
-        area.bottom() - rows - 1,
+        area.right() - width - 3,
+        area.bottom() - rows - 2,
         width,
         rows,
     );
-    frame.render_widget(Clear, popup);
     let prefix = app.keymap.label(Action::GotoPrefix);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(t.focused_border())
-        .title(Span::styled(format!(" {prefix} → go to "), t.title()));
+    let inner = chrome::modal(frame, popup, format!("Go to  ({prefix} …)"), "Esc cancel");
     let lines: Vec<Line> = GOTO_TARGETS
         .iter()
         .map(|(c, action)| {
             Line::from(vec![
-                Span::styled(
-                    format!(" {c}  "),
-                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-                ),
+                chrome::keycap(&c.to_string(), t.overlay),
+                Span::raw("  "),
                 Span::styled(action.label().trim_start_matches("Go to "), t.normal()),
             ])
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(Paragraph::new(lines), inner);
 }

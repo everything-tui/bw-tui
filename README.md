@@ -107,6 +107,7 @@ The vault browser follows a few rules so keys are guessable:
 | `r` `X` (Trash) | Restore / empty trash |
 | `c` `o` (Sends) | Copy Send link / open a received Send link |
 | `P` `R` `D` `,` | Generator / health report / domain rules / account settings |
+| `Ctrl+t` | Change theme (live preview) |
 | `Ctrl+s` `Ctrl+l` `Ctrl+n` `Ctrl+p` | Sync / lock / new folder / profiles |
 | `:` or `Ctrl+k` | Command palette (every command, with its key) |
 | `?` | Help |
@@ -129,6 +130,36 @@ keys = "Ctrl+q"
 ```
 
 Action names are the snake_case form of the palette entries (`copy_password`, `toggle_favorite`, `goto_prefix`, `receive_send`, …). Conflicts and unknown names are reported as warnings at startup.
+
+## Themes
+
+The interface is drawn in layers rather than boxes. The sidebar, header and status bar sit on the darkest tone, the item list on the middle tone, and the detail pane on the lightest. Popups float on a dimmed backdrop. Every color comes from the active theme.
+
+**Switch live:** press `Ctrl+t` (or pick *Change theme* in the `:` palette). Moving through the list previews each theme immediately; `Enter` keeps it and saves it to `config.toml`, `Esc` reverts.
+
+Built-in themes: `default` (violet), `catppuccin-mocha`, `catppuccin-latte`, `tokyo-night`, `rose-pine`, `gruvbox`, `dracula`, `nord`, `bitwarden`, `solarized`, `light`, `high-contrast`.
+
+```toml
+theme = "tokyo-night"
+transparent_background = false   # true: let the terminal background show through the panes
+
+[colors]                         # optional: override any token of the chosen theme
+accent = "#ff79c6"
+surface = "30, 32, 48"           # hex or "r, g, b"
+```
+
+Tokens you can set under `[colors]`:
+
+| Group | Tokens |
+| --- | --- |
+| Surfaces (back → front) | `mantle`, `base`, `surface`, `overlay`, `backdrop` |
+| Text | `text`, `subtext`, `muted` |
+| Accent & selection | `accent`, `accent_fg`, `accent_dim`, `select_bg`, `select_bg_idle`, `border`, `border_focused` |
+| Status | `danger`, `success`, `warning`, `info`, `favorite` |
+| Item types | `login`, `note`, `card`, `identity`, `ssh` |
+| Revealed passwords | `digit`, `symbol` |
+
+Overrides and `transparent_background` stay applied when you switch themes. `NO_COLOR` gives a monochrome UI, and `BW_ASCII=1` swaps the Unicode glyphs for ASCII.
 
 ### Scripting CLI
 

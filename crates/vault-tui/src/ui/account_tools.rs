@@ -1,35 +1,22 @@
 //! Account tools overlay drawing (KDF, 2FA setup, device approvals, forwarders, …).
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{tool_fields, App, Overlay, ToolScreen, TOOL_MENU};
+use crate::ui::chrome;
 use crate::ui::layout::center_fixed;
-
-const ACCENT: Color = Color::Rgb(175, 82, 222);
-const MUTED: Color = Color::DarkGray;
-const FG: Color = Color::White;
-const ERR: Color = Color::LightRed;
-const OK: Color = Color::LightGreen;
+use crate::ui::theme::pal;
 
 pub fn draw_account_tools(frame: &mut Frame, app: &App) {
     let Overlay::AccountTools(st) = &app.overlay else {
         return;
     };
     let area = center_fixed(72, 22, frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Account tools ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().fg(FG));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = chrome::modal(frame, area, " Account tools ", "");
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -55,7 +42,9 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             title,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal::accent())
+                .add_modifier(Modifier::BOLD),
         ))),
         chunks[0],
     );
@@ -69,9 +58,11 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
                 lines.push(Line::from(Span::styled(
                     format!("{prefix}[{key}] {label}"),
                     if selected {
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(pal::accent())
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(FG)
+                        Style::default().fg(pal::text())
                     },
                 )));
             }
@@ -80,7 +71,7 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
             if st.incoming.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "No pending login requests.",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(pal::muted()),
                 )));
             } else {
                 for (i, req) in st.incoming.iter().enumerate() {
@@ -92,15 +83,15 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
                             req.device_type, req.ip_address, req.fingerprint
                         ),
                         if selected {
-                            Style::default().fg(ACCENT)
+                            Style::default().fg(pal::accent())
                         } else {
-                            Style::default().fg(FG)
+                            Style::default().fg(pal::text())
                         },
                     )));
                 }
                 lines.push(Line::from(Span::styled(
                     "y approve · n deny · Esc back",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(pal::muted()),
                 )));
             }
         }
@@ -112,22 +103,22 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
                 lines.push(Line::from(Span::styled(
                     format!("{prefix}{svc:?} — {flag}"),
                     if selected {
-                        Style::default().fg(ACCENT)
+                        Style::default().fg(pal::accent())
                     } else {
-                        Style::default().fg(FG)
+                        Style::default().fg(pal::text())
                     },
                 )));
             }
             lines.push(Line::from(Span::styled(
                 "Enter edit · d clear · Esc back",
-                Style::default().fg(MUTED),
+                Style::default().fg(pal::muted()),
             )));
         }
         ToolScreen::Biometric => {
             for line in &st.info_lines {
                 lines.push(Line::from(Span::styled(
                     line.clone(),
-                    Style::default().fg(FG),
+                    Style::default().fg(pal::text()),
                 )));
             }
         }
@@ -142,19 +133,21 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
                     raw.to_string()
                 };
                 let style = if focused {
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(pal::accent())
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(FG)
+                    Style::default().fg(pal::text())
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{label}: "), Style::default().fg(MUTED)),
+                    Span::styled(format!("{label}: "), Style::default().fg(pal::muted())),
                     Span::styled(shown, style),
                 ]));
             }
             for line in &st.info_lines {
                 lines.push(Line::from(Span::styled(
                     line.clone(),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(pal::muted()),
                 )));
             }
             for qr in st.qr_lines.iter().take(12) {
@@ -163,7 +156,7 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
             if let Some(confirm) = &st.confirm {
                 lines.push(Line::from(Span::styled(
                     format!("Confirm {confirm:?}?  y / n"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(pal::warning()),
                 )));
             }
         }
@@ -172,7 +165,11 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[1]);
 
     if !st.message.is_empty() {
-        let color = if st.is_error { ERR } else { OK };
+        let color = if st.is_error {
+            pal::danger()
+        } else {
+            pal::success()
+        };
         frame.render_widget(
             Paragraph::new(st.message.as_str()).style(Style::default().fg(color)),
             chunks[2],
@@ -181,7 +178,7 @@ pub fn draw_account_tools(frame: &mut Frame, app: &App) {
 
     frame.render_widget(
         Paragraph::new("Esc back · Tab fields · Enter submit")
-            .style(Style::default().fg(MUTED))
+            .style(Style::default().fg(pal::muted()))
             .alignment(Alignment::Center),
         chunks[3],
     );

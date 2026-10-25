@@ -4,6 +4,19 @@
 
 ### Changed
 
+- **Modernized look ("flat & layered")**: pane borders are gone. Each column has its own background tone, and a header bar shows the breadcrumb, sync state, lock timer and profile. Other changes:
+  - Status bar: a mode chip plus keycap hints
+  - Item list: colored letter avatars, an always-visible search bar, aligned subtitle and badge columns
+  - Detail pane: stacked field labels with copy keycaps, grouped TOTP codes with a countdown glyph
+  - Dialogs float on a dimmed backdrop with soft edges, keycap hints, filled input fields and ◉/○ toggles
+  - Generator: colored password, strength meter and option toggles. Health report: stat tiles
+  - Login, unlock and 2FA: the brand and card are centered together
+- **Configurable themes**: 12 built-ins (default, Catppuccin Mocha/Latte, Tokyo Night, Rosé Pine, Gruvbox, Dracula, Nord, Bitwarden, Solarized, light, high-contrast). Other parts:
+  - `Ctrl+t` opens a live-preview picker that saves to `config.toml`
+  - Every color token can be overridden under `[colors]`
+  - `transparent_background = true` lets the terminal background show through
+- Every UI color now comes from the theme. Before, most screens hardcoded their own colors, so `theme = "…"` barely changed anything
+- Mouse clicks hit-test against the last drawn frame instead of re-deriving the layout
 - **Reworked vault navigation and shortcuts** (see README → Keybindings):
   - `g` is now a go-to prefix with a popup: `g g` top, `g f` favorites, `g t` trash, `g s` sends, … `G` jumps to the bottom. The password generator moved from `g` to `P`
   - `Enter` drills in (folders → items → detail → edit); `Esc` steps back (pane → search → marks). The detail pane scrolls with `j`/`k` when focused

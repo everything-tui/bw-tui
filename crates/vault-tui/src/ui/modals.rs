@@ -1,25 +1,23 @@
 //! Modal overlays: item form, generator, folder create, delete confirm, reprompt.
 
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{
     uri_match_label, App, DeleteTarget, EditField, NoteField, Overlay, ShareToOrgStep,
 };
+use crate::ui::chrome;
 use crate::ui::form::{draw_form_field, draw_form_field_with_hint};
 use crate::ui::layout::center_fixed;
-
-const ACCENT: Color = Color::Rgb(175, 82, 222);
-const MUTED: Color = Color::DarkGray;
-const FG: Color = Color::White;
-const ERR: Color = Color::LightRed;
+use crate::ui::theme::pal;
 
 pub fn draw_overlay(frame: &mut Frame, app: &App) {
     match &app.overlay {
         Overlay::None => {}
+        Overlay::ThemePicker { .. } => draw_theme_picker(frame, app),
         Overlay::Power(_) => super::power::draw_power_overlay(frame, app),
         Overlay::ItemForm { .. } => draw_item_form(frame, app),
         Overlay::NoteForm { .. } => draw_note_form(frame, app),
@@ -50,6 +48,60 @@ pub fn draw_overlay(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_theme_picker(frame: &mut Frame, app: &App) {
+    use crate::ui::theme::{theme, Theme, THEME_NAMES};
+    let Overlay::ThemePicker { selected, .. } = &app.overlay else {
+        return;
+    };
+    let t = theme();
+    let height = (THEME_NAMES.len() as u16 + 4).min(frame.area().height);
+    let popup = center_fixed(52, height, frame.area());
+    let inner = chrome::modal(
+        frame,
+        popup,
+        "Theme",
+        "↑↓ preview · Enter keep · Esc revert",
+    );
+    for (i, name) in THEME_NAMES.iter().enumerate() {
+        let y = inner.y + 1 + i as u16;
+        if y >= inner.bottom() {
+            break;
+        }
+        let Some(th) = Theme::builtin(name) else {
+            continue;
+        };
+        let is_sel = i == *selected;
+        let bg = if is_sel { t.select_bg } else { t.overlay };
+        let mut spans = vec![
+            Span::styled(
+                if is_sel { "▌ " } else { "  " },
+                Style::default().fg(t.accent),
+            ),
+            Span::styled(
+                format!("{name:<20}"),
+                if is_sel {
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.subtext)
+                },
+            ),
+        ];
+        // Swatches: the theme's own surfaces and accents.
+        for c in [
+            th.mantle, th.base, th.surface, th.accent, th.login, th.card, th.note, th.danger,
+        ] {
+            spans.push(Span::styled("██", Style::default().fg(c)));
+        }
+        if name.eq_ignore_ascii_case(&app.config.theme) {
+            spans.push(Span::styled("  current", Style::default().fg(t.muted)));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(bg)),
+            ratatui::layout::Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
+}
+
 fn draw_custom_fields_form(frame: &mut Frame, app: &App) {
     let Overlay::CustomFieldsForm {
         fields,
@@ -66,20 +118,12 @@ fn draw_custom_fields_form(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(64, 18, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Custom fields ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " n new · d delete · Enter edit · Ctrl+s save · Esc ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Custom fields ",
+        " n new · d delete · Enter edit · Ctrl+s save · Esc ",
+    );
 
     let mut lines: Vec<Line> = Vec::new();
     if editing.is_some() {
@@ -107,12 +151,12 @@ fn draw_custom_fields_form(frame: &mut Frame, app: &App) {
         )));
         lines.push(Line::from(Span::styled(
             "Enter to apply field",
-            Style::default().fg(MUTED),
+            Style::default().fg(pal::muted()),
         )));
     } else if fields.is_empty() {
         lines.push(Line::from(Span::styled(
             "No custom fields — press n to add",
-            Style::default().fg(MUTED),
+            Style::default().fg(pal::muted()),
         )));
     } else {
         for (i, f) in fields.iter().enumerate() {
@@ -134,17 +178,12 @@ fn draw_attachment_path(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(56, 7, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(" Upload attachment ")
-        .title_bottom(Span::styled(
-            " Ctrl+s upload · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Upload attachment ",
+        " Ctrl+s upload · Esc cancel ",
+    );
     draw_form_field(frame, inner, "Path", path, true, false);
 }
 
@@ -167,31 +206,22 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
 
     let area = frame.area();
     let popup = center_fixed(68, 26, area);
-    frame.render_widget(Clear, popup);
 
     let title = if editing_id.is_some() {
         " Edit login "
     } else {
         " New login "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            // Popup is 68 wide: only show the keys that apply to the focused field.
-            if *field == EditField::Uri {
-                " ^n add · ^d del · ^f/^b next/prev · ^t match · ^s save · Esc "
-            } else {
-                " Tab next · Ctrl+s save · Ctrl+g generate password · Esc cancel "
-            },
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        title, // Popup is 68 wide: only show the keys that apply to the focused field.
+        if *field == EditField::Uri {
+            " ^n add · ^d del · ^f/^b next/prev · ^t match · ^s save · Esc "
+        } else {
+            " Tab next · Ctrl+s save · Ctrl+g generate password · Esc cancel "
+        },
+    );
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -257,12 +287,15 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
         *field == EditField::Notes,
         false,
     );
-    let reprompt_label = format!("[{}] Require master password re-prompt", on(*reprompt));
+    let reprompt_label = format!(
+        "{}  Require master password re-prompt",
+        chrome::check(*reprompt)
+    );
     frame.render_widget(
         Paragraph::new(reprompt_label).style(if *field == EditField::Reprompt {
-            Style::default().fg(ACCENT)
+            Style::default().fg(pal::accent())
         } else {
-            Style::default().fg(MUTED)
+            Style::default().fg(pal::muted())
         }),
         rows[6],
     );
@@ -280,25 +313,17 @@ fn draw_note_form(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(64, 16, area);
-    frame.render_widget(Clear, popup);
     let title = if editing_id.is_some() {
         " Edit note "
     } else {
         " New note "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Tab fields · Ctrl+s / Enter save · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        title,
+        " Tab fields · Ctrl+s / Enter save · Esc cancel ",
+    );
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(3)])
@@ -325,37 +350,48 @@ fn draw_new_item_type(frame: &mut Frame, app: &App) {
     let Overlay::NewItemType { selected } = &app.overlay else {
         return;
     };
+    let t = crate::ui::theme::theme();
     let area = frame.area();
-    let popup = center_fixed(40, 12, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " New item ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " j/k · Enter · Esc ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    let options = ["Login", "Secure note", "Card", "Identity", "SSH key"];
-    let lines: Vec<Line> = options
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let marker = if i == *selected { "› " } else { "  " };
-            let style = if i == *selected {
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(FG)
-            };
-            Line::from(Span::styled(format!("{marker}{label}"), style))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    let popup = center_fixed(46, 13, area);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        "New item",
+        "↑↓ choose · Enter create · Esc cancel",
+    );
+    let options = [
+        ("Login", "website credentials and TOTP", t.login),
+        ("Secure note", "free-form encrypted text", t.note),
+        ("Card", "payment card details", t.card),
+        ("Identity", "name, address, documents", t.identity),
+        ("SSH key", "Ed25519 key pair", t.ssh),
+    ];
+    for (i, (label, desc, color)) in options.iter().enumerate() {
+        let y = inner.y + 1 + (i as u16) * 2;
+        if y >= inner.bottom() {
+            break;
+        }
+        let is_sel = i == *selected;
+        let bg = if is_sel { t.select_bg } else { t.overlay };
+        let line = Line::from(vec![
+            Span::styled(
+                if is_sel { "▌ " } else { "  " },
+                Style::default().fg(t.accent),
+            ),
+            chrome::avatar(label, *color),
+            Span::styled(
+                format!("  {label:<12}"),
+                if is_sel {
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.text)
+                },
+            ),
+            Span::styled(desc.to_string(), Style::default().fg(t.muted)),
+        ])
+        .style(Style::default().bg(bg));
+        frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
+    }
 }
 
 fn draw_generator(frame: &mut Frame, app: &App) {
@@ -384,117 +420,147 @@ fn draw_generator(frame: &mut Frame, app: &App) {
         return;
     };
 
+    let t = crate::ui::theme::theme();
     let area = frame.area();
-    let popup = center_fixed(68, 18, area);
-    frame.render_widget(Clear, popup);
+    let popup = center_fixed(68, 16, area);
 
     let title = match mode {
-        GeneratorMode::Passphrase => " Passphrase generator ",
-        GeneratorMode::Username => " Username generator ",
-        GeneratorMode::Password => " Password generator ",
+        GeneratorMode::Passphrase => "Passphrase generator",
+        GeneratorMode::Username => "Username generator",
+        GeneratorMode::Password => "Password generator",
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            if *insert_to_form {
-                " Enter insert · m mode · r regen · Esc "
-            } else {
-                " Enter/c copy · m mode · r regen · Esc "
-            },
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Min(1),
-        ])
-        .margin(1)
-        .split(inner);
-
-    frame.render_widget(
-        Paragraph::new(preview.as_str())
-            .style(Style::default().fg(FG).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        rows[0],
-    );
-
-    let strength = if matches!(mode, GeneratorMode::Password | GeneratorMode::Passphrase)
-        && !preview.is_empty()
-    {
-        // zxcvbn: dictionary / pattern aware, not just charset size.
-        let s = evaluate_password(preview, &[]);
-        format!(
-            "Strength: {} ({}/4, ~{:.0} bits)",
-            s.label, s.score, s.entropy_bits
-        )
+    let primary = if *insert_to_form {
+        "Enter insert"
     } else {
-        String::new()
+        "Enter copy"
     };
-    frame.render_widget(
-        Paragraph::new(strength)
-            .style(Style::default().fg(MUTED))
-            .alignment(Alignment::Center),
-        rows[1],
+    let inner = chrome::modal(
+        frame,
+        popup,
+        title,
+        format!("{primary} · r regenerate · m mode · Esc close"),
     );
-
-    let flags = match mode {
-        GeneratorMode::Passphrase => format!(
-            "words {passphrase_words}  sep '{passphrase_separator}'  [{}] Cap  [{}] number",
-            on(*passphrase_capitalize),
-            on(*passphrase_include_number),
-        ),
-        GeneratorMode::Username => format!(
-            "kind: {}",
-            match username_kind {
-                UsernameKind::Word => "word",
-                UsernameKind::Plus => "plus-address",
-                UsernameKind::Catchall => "catch-all",
-                UsernameKind::SimpleLogin => "SimpleLogin alias",
-                UsernameKind::AddyIo => "addy.io alias",
-            }
-        ),
-        GeneratorMode::Password => format!(
-            "len {length}  [{}] U  [{}] L  [{}] #  [{}] !  [{}] unambig  min# {min_numbers} min! {min_special}",
-            on(*uppercase),
-            on(*lowercase),
-            on(*digits),
-            on(*symbols),
-            on(*avoid_ambiguous),
-        ),
-    };
-    frame.render_widget(
-        Paragraph::new(flags)
-            .style(Style::default().fg(MUTED))
-            .alignment(Alignment::Center),
-        rows[2],
-    );
-    frame.render_widget(
-        Paragraph::new("m cycle mode · k username kind · a unambig · [/] min# · {/} min!")
-            .style(Style::default().fg(MUTED))
-            .alignment(Alignment::Center),
-        rows[3],
-    );
-}
-
-fn on(v: bool) -> char {
-    if v {
-        'x'
-    } else {
-        ' '
+    if inner.height < 9 {
+        return;
     }
+
+    // The value, large and centred in an inset well.
+    let well = Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 3);
+    chrome::fill(frame, well, t.surface);
+    let shown: Vec<Span> = if matches!(mode, GeneratorMode::Username) {
+        vec![Span::styled(preview.clone(), Style::default().fg(t.text))]
+    } else {
+        t.password_spans(preview)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(shown))
+            .style(Style::default().add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center),
+        Rect::new(well.x, well.y + 1, well.width, 1),
+    );
+
+    // Strength meter.
+    let mut y = well.bottom() + 1;
+    if matches!(mode, GeneratorMode::Password | GeneratorMode::Passphrase) && !preview.is_empty() {
+        // zxcvbn: dictionary / pattern aware, not just charset size.
+        let st = evaluate_password(preview, &[]);
+        let color = match st.score {
+            0 | 1 => t.danger,
+            2 => t.warning,
+            _ => t.success,
+        };
+        let mut spans = vec![Span::styled("  Strength  ", Style::default().fg(t.muted))];
+        spans.extend(chrome::meter((st.score as usize + 1) * 4, 20, color));
+        spans.push(Span::styled(
+            format!("  {}  ·  ~{:.0} bits", st.label, st.entropy_bits),
+            Style::default().fg(t.subtext),
+        ));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
+    y += 2;
+
+    // Options as toggles.
+    let toggle = |on: bool, label: &str| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(
+                chrome::check(on),
+                Style::default().fg(if on { t.accent } else { t.muted }),
+            ),
+            Span::styled(
+                format!(" {label}   "),
+                Style::default().fg(if on { t.text } else { t.subtext }),
+            ),
+        ]
+    };
+    let value = |label: &str, v: String| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(format!("{label} "), Style::default().fg(t.muted)),
+            Span::styled(
+                format!("{v}   "),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+            ),
+        ]
+    };
+    let mut opts: Vec<Span> = vec![Span::raw("  ")];
+    let legend: &str = match mode {
+        GeneratorMode::Password => {
+            opts.extend(value("Length", length.to_string()));
+            opts.extend(toggle(*uppercase, "A-Z"));
+            opts.extend(toggle(*lowercase, "a-z"));
+            opts.extend(toggle(*digits, "0-9"));
+            opts.extend(toggle(*symbols, "!@#"));
+            opts.extend(toggle(*avoid_ambiguous, "unambiguous"));
+            "+/- length · u A-Z · l a-z · d 0-9 · s !@# · a unambiguous"
+        }
+        GeneratorMode::Passphrase => {
+            opts.extend(value("Words", passphrase_words.to_string()));
+            opts.extend(value("Separator", format!("“{passphrase_separator}”")));
+            opts.extend(toggle(*passphrase_capitalize, "Capitalize"));
+            opts.extend(toggle(*passphrase_include_number, "Number"));
+            "+/- words · C capitalize · n number"
+        }
+        GeneratorMode::Username => {
+            opts.extend(value(
+                "Kind",
+                match username_kind {
+                    UsernameKind::Word => "random word",
+                    UsernameKind::Plus => "plus-address",
+                    UsernameKind::Catchall => "catch-all",
+                    UsernameKind::SimpleLogin => "SimpleLogin alias",
+                    UsernameKind::AddyIo => "addy.io alias",
+                }
+                .to_string(),
+            ));
+            "k cycle kind"
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(opts)),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+    if matches!(mode, GeneratorMode::Password) {
+        let mins =
+            format!("min digits {min_numbers}  ·  min symbols {min_special}  ({{ }} adjust)");
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  {mins}"),
+                Style::default().fg(t.muted),
+            )),
+            Rect::new(inner.x, y + 1, inner.width, 1),
+        );
+    }
+    let mut legend_spans = vec![Span::raw("  ")];
+    legend_spans.extend(chrome::fit(
+        chrome::hint_spans(legend, t.overlay),
+        inner.width.saturating_sub(2) as usize,
+    ));
+    frame.render_widget(
+        Paragraph::new(Line::from(legend_spans)),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
 }
 
 fn draw_folder_form(frame: &mut Frame, app: &App) {
@@ -504,26 +570,13 @@ fn draw_folder_form(frame: &mut Frame, app: &App) {
 
     let area = frame.area();
     let popup = center_fixed(48, 8, area);
-    frame.render_widget(Clear, popup);
 
     let title = if folder_id.is_some() {
         " Rename folder "
     } else {
         " New folder "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Enter save · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(frame, popup, title, " Enter save · Esc cancel ");
 
     draw_form_field(frame, inner, "Name", name, true, false);
 }
@@ -560,37 +613,50 @@ fn draw_confirm_delete(frame: &mut Frame, app: &App) {
         ),
     };
 
+    let t = crate::ui::theme::theme();
+    let permanent = matches!(
+        target,
+        DeleteTarget::Item {
+            permanent: true,
+            ..
+        } | DeleteTarget::EmptyTrash { .. }
+    );
+    let verb = if permanent {
+        "Delete forever"
+    } else {
+        "Delete"
+    };
     let area = frame.area();
-    let popup = center_fixed(50, 7, area);
-    frame.render_widget(Clear, popup);
+    let popup = center_fixed(56, 8, area);
+    let inner = chrome::modal(frame, popup, title, "");
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ERR))
-        .title(Span::styled(
-            title,
-            Style::default().fg(ERR).add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
+    let warn = if t.ascii { "!" } else { "⚠" };
     let lines = vec![
-        Line::from(Span::styled(prompt, Style::default().fg(FG))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!("{warn}  "), Style::default().fg(t.danger)),
+            Span::styled(prompt, Style::default().fg(t.text)),
+        ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "y",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                format!(" y  {verb} "),
+                Style::default()
+                    .fg(t.accent_fg)
+                    .bg(t.danger)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" yes   ", Style::default().fg(MUTED)),
-            Span::styled(
-                "n",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" / Esc cancel", Style::default().fg(MUTED)),
+            Span::raw("    "),
+            chrome::keycap("Esc", t.overlay),
+            Span::styled(" Cancel", Style::default().fg(t.subtext)),
         ]),
     ];
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn draw_reprompt(frame: &mut Frame, app: &App) {
@@ -602,20 +668,12 @@ fn draw_reprompt(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(52, 9, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Master password required ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Enter confirm · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Master password required ",
+        " Enter confirm · Esc cancel ",
+    );
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Length(1)])
@@ -623,7 +681,7 @@ fn draw_reprompt(frame: &mut Frame, app: &App) {
     draw_form_field(frame, rows[0], "Password", password, true, true);
     if let Some(err) = error {
         frame.render_widget(
-            Paragraph::new(err.as_str()).style(Style::default().fg(ERR)),
+            Paragraph::new(err.as_str()).style(Style::default().fg(pal::danger())),
             rows[1],
         );
     }
@@ -661,25 +719,17 @@ fn draw_identity_form(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(70, 24, area);
-    frame.render_widget(Clear, popup);
     let title_hdr = if editing_id.is_some() {
         " Edit identity "
     } else {
         " New identity "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title_hdr,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Tab cycle fields · Ctrl+s save · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        title_hdr,
+        " Tab cycle fields · Ctrl+s save · Esc cancel ",
+    );
 
     // Show a window of fields around the focused one (compact scrolling form).
     let entries: Vec<(&str, &str, IdentityField)> = vec![
@@ -725,12 +775,15 @@ fn draw_identity_form(frame: &mut Frame, app: &App) {
     for (i, (label, value, f)) in visible.iter().enumerate() {
         draw_form_field(frame, rows[i], label, value, *f == *field, false);
     }
-    let reprompt_label = format!("[{}] Require master password re-prompt", on(*reprompt));
+    let reprompt_label = format!(
+        "{}  Require master password re-prompt",
+        chrome::check(*reprompt)
+    );
     frame.render_widget(
         Paragraph::new(reprompt_label).style(if *field == IdentityField::Reprompt {
-            Style::default().fg(ACCENT)
+            Style::default().fg(pal::accent())
         } else {
-            Style::default().fg(MUTED)
+            Style::default().fg(pal::muted())
         }),
         rows[visible.len()],
     );
@@ -752,25 +805,17 @@ fn draw_ssh_key_form(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(64, 18, area);
-    frame.render_widget(Clear, popup);
     let title_hdr = if editing_id.is_some() {
         " Edit SSH key "
     } else {
         " New SSH key "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title_hdr,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Tab · Ctrl+g gen Ed25519 · Ctrl+e notes in $EDITOR · Ctrl+s save · Esc ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        title_hdr,
+        " Tab · Ctrl+g gen Ed25519 · Ctrl+e notes in $EDITOR · Ctrl+s save · Esc ",
+    );
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -829,20 +874,12 @@ fn draw_move_to_folder(frame: &mut Frame, app: &App) {
     };
     let area = frame.area();
     let popup = center_fixed(44, (app.folders.len() + 5).min(18) as u16, area);
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " Move to folder ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " j/k · Enter confirm · Esc cancel ",
-            Style::default().fg(MUTED),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(
+        frame,
+        popup,
+        " Move to folder ",
+        " j/k · Enter confirm · Esc cancel ",
+    );
     let mut lines = vec![Line::from(Span::styled(
         if *selected == 0 {
             "› (no folder)"
@@ -850,18 +887,22 @@ fn draw_move_to_folder(frame: &mut Frame, app: &App) {
             "  (no folder)"
         },
         if *selected == 0 {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(pal::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(FG)
+            Style::default().fg(pal::text())
         },
     ))];
     for (i, folder) in app.folders.iter().enumerate() {
         let idx = i + 1;
         let marker = if idx == *selected { "› " } else { "  " };
         let style = if idx == *selected {
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(pal::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(FG)
+            Style::default().fg(pal::text())
         };
         lines.push(Line::from(Span::styled(
             format!("{marker}{}", folder.name),
@@ -890,7 +931,6 @@ fn draw_share_to_org(frame: &mut Frame, app: &App) {
         ShareToOrgStep::PickCollections => (writable.len() + 8).min(22) as u16,
     };
     let popup = center_fixed(52, height.max(8), area);
-    frame.render_widget(Clear, popup);
     let title = match step {
         ShareToOrgStep::PickOrganization => {
             format!(" Share to org · {} item(s) ", item_ids.len())
@@ -907,16 +947,7 @@ fn draw_share_to_org(frame: &mut Frame, app: &App) {
         ShareToOrgStep::PickOrganization => " j/k · Enter next · Esc cancel ",
         ShareToOrgStep::PickCollections => " j/k · Space toggle · Enter share · Esc back ",
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(hints, Style::default().fg(MUTED)));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = chrome::modal(frame, popup, title, hints);
 
     let mut lines: Vec<Line> = Vec::new();
     match step {
@@ -924,9 +955,11 @@ fn draw_share_to_org(frame: &mut Frame, app: &App) {
             for (i, g) in groups.iter().enumerate() {
                 let marker = if i == *org_index { "› " } else { "  " };
                 let style = if i == *org_index {
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(pal::accent())
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(FG)
+                    Style::default().fg(pal::text())
                 };
                 lines.push(Line::from(Span::styled(
                     format!(
@@ -941,9 +974,9 @@ fn draw_share_to_org(frame: &mut Frame, app: &App) {
         ShareToOrgStep::PickCollections => {
             for (i, (id, name)) in writable.iter().enumerate() {
                 let checked = if selected_collections.contains(id) {
-                    "[x]"
+                    chrome::check(true)
                 } else {
-                    "[ ]"
+                    chrome::check(false)
                 };
                 let marker = if i == *collection_cursor {
                     "› "
@@ -951,9 +984,11 @@ fn draw_share_to_org(frame: &mut Frame, app: &App) {
                     "  "
                 };
                 let style = if i == *collection_cursor {
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(pal::accent())
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(FG)
+                    Style::default().fg(pal::text())
                 };
                 lines.push(Line::from(Span::styled(
                     format!("{marker}{checked} {name}"),
@@ -963,7 +998,7 @@ fn draw_share_to_org(frame: &mut Frame, app: &App) {
             if writable.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "No writable collections",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(pal::muted()),
                 )));
             }
         }
