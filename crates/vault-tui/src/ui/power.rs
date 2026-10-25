@@ -115,7 +115,10 @@ fn draw_attachments(frame: &mut Frame, p: &PowerOverlay) {
     let height = (items.len() as u16 + 4).clamp(6, 18);
     let popup = center_fixed(64, height, area);
     frame.render_widget(Clear, popup);
-    let block = popup_block("Attachments", "o open · p preview · s save · Esc close");
+    let block = popup_block(
+        "Attachments",
+        "Enter open · p preview · s save · d delete · a upload · Esc close",
+    );
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let lines: Vec<Line> = items

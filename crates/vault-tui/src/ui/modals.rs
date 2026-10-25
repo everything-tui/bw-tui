@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::{
     uri_match_label, App, DeleteTarget, EditField, NoteField, Overlay, ShareToOrgStep,
 };
-use crate::ui::form::draw_form_field;
+use crate::ui::form::{draw_form_field, draw_form_field_with_hint};
 use crate::ui::layout::center_fixed;
 
 const ACCENT: Color = Color::Rgb(175, 82, 222);
@@ -182,7 +182,12 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " Tab · Ctrl+s save · URI: ^t match · ^n add · ^d del · ^b/^f line · Esc ",
+            // Popup is 68 wide: only show the keys that apply to the focused field.
+            if *field == EditField::Uri {
+                " ^n add · ^d del · ^f/^b next/prev · ^t match · ^s save · Esc "
+            } else {
+                " Tab next · Ctrl+s save · Ctrl+g generate password · Esc cancel "
+            },
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);
@@ -217,13 +222,14 @@ fn draw_item_form(frame: &mut Frame, app: &App) {
         *field == EditField::Username,
         false,
     );
-    draw_form_field(
+    draw_form_field_with_hint(
         frame,
         rows[2],
         "Password",
         password,
         *field == EditField::Password,
         true,
+        "Ctrl+g generate",
     );
     draw_form_field(
         frame,

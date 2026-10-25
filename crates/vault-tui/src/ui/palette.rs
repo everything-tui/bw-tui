@@ -19,7 +19,7 @@ pub fn draw_command_palette(frame: &mut Frame, app: &App) {
         return;
     };
     let area = frame.area();
-    let popup = center_fixed(64, 16, area);
+    let popup = center_fixed(72, 20, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -30,7 +30,7 @@ pub fn draw_command_palette(frame: &mut Frame, app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " ↑↓ select · Enter run · Esc close ",
+            " ↑↓ / Ctrl+n,p select · Enter run · Esc close ",
             Style::default().fg(MUTED),
         ));
     let inner = block.inner(popup);
@@ -53,19 +53,21 @@ pub fn draw_command_palette(frame: &mut Frame, app: &App) {
     );
 
     let actions = app.palette_filtered_actions();
+    let viewport = rows[1].height as usize;
+    let width = rows[1].width as usize;
+    // Keep the selection in view once it moves past the first page.
+    let offset = selected.saturating_sub(viewport.saturating_sub(1));
     let mut lines = Vec::new();
-    for (i, action) in actions.iter().take(10).enumerate() {
+    for (i, action) in actions.iter().enumerate().skip(offset).take(viewport) {
         let bg = if i == *selected { SELECT } else { Color::Reset };
-        lines.push(Line::from(Span::styled(
-            action.label(),
-            Style::default().fg(FG).bg(bg),
-        )));
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No matching commands",
-            Style::default().fg(MUTED),
-        )));
+        let key = app.keymap.label(*action);
+        let label = action.label();
+        let gap = width.saturating_sub(label.chars().count() + key.chars().count() + 2);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {label}"), Style::default().fg(FG).bg(bg)),
+            Span::styled(" ".repeat(gap), Style::default().bg(bg)),
+            Span::styled(format!("{key} "), Style::default().fg(ACCENT).bg(bg)),
+        ]));
     }
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), rows[1]);
 }

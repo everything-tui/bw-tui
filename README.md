@@ -69,7 +69,7 @@ Environment overrides:
 Under the app data directory (`~/Library/Application Support/com.bitwarden-tui.bitwarden-tui/` on macOS, `~/.local/share/bitwarden-tui/` on Linux):
 
 ```text
-config.toml                   # theme, generator defaults, background sync interval, keybinding overrides (stub)
+config.toml                   # theme, generator defaults, background sync interval, keybinding overrides
 profiles.json                 # registry + active profile
 profiles/<id>/auth.json       # profile auth metadata + cached KDF (refresh token prefers OS keychain)
 profiles/<id>/vault.cache     # UserKey-encrypted last sync (offline unlock)
@@ -77,49 +77,58 @@ profiles/<id>/vault.cache     # UserKey-encrypted last sync (offline unlock)
 
 Older installs with a flat `login.json` / `auth.json` are migrated once into profile `default`.
 
-## Keybindings (summary)
+## Keybindings
+
+The vault browser follows a few rules so keys are guessable:
+
+- **Lowercase = frequent, Shift = heavier variant, Ctrl = app-level.** `c` copies, `C` clones; `p` copies the SSH public key, `P` opens the generator.
+- **One key, one meaning.** Copy keys work from any pane, and each field in the detail pane shows the key that copies it. `n` / `e` / `d` always mean new / edit / delete *the focused thing* (item, folder, or Send).
+- **Enter goes in, Esc goes back.** Enter: folders → items → detail → edit. Esc: leave the pane → clear the search → clear marks.
+- **Hints follow you.** The status bar shows the keys that matter for the current pane/view; `:` lists every command with its key; `?` shows the full map.
 
 | Key | Action |
 | --- | --- |
-| `/` | Fuzzy search (`type:login`, `folder:work`, `name:foo`, `url:github.com`, …) |
-| `:` / Ctrl+k | Command palette |
-| `H` | Password history for selected item |
-| `R` | Vault health report |
-| `1`–`9` | Copy custom field (detail pane) |
-| `j` / `k` or `↓` / `↑` | Move selection |
-| `Tab` / `h` / `l` | Cycle pane focus |
-| `c` / `y` / `t` / `u` | Copy password / username / TOTP / URI |
-| `m` / `v` / `x` / `p` / `b` / `o` | Copy card # / CVC / expiry / SSH keys / notes (detail) |
-| `n` | New item (login or secure note) |
-| `e` / `d` (folders pane) | Rename / delete folder |
-| `Ctrl+a` (login) | Toggle password vs API-key login |
-| `m` (2FA) | Resend email verification code |
-| `Space` (2FA) | Remember this device (skip 2FA next login when server allows) |
-| `Tab` / `p` (unlock) | Toggle master password vs PIN unlock (when PIN configured) |
-| `,` | Account settings (fingerprint, password hint, change-password stub) |
-| `Shift+C` | Clone selected personal item |
-| `s` (sidebar focused) | Quick New Send from any sidebar row (same overlay as below) |
-| `n` / `e` / `d` / `L` (Sends filter) | New / edit / delete / copy link. **New** opens Quick create (text or file path + optional password; `Enter` saves; name auto-filled; `Ctrl+t` toggles type). Tab to **Advanced…** (or `a` before typing) for name, notes, max access, dates, hide email/text, disabled. **Edit** always uses the full form |
-| `s` (items / detail) | Cycle sort: name / recently used / modified |
-| `O` or palette → *Open Send link* | Receive a Send from a share URL (password prompt if needed; `c` copy text, `r` reveal, `Enter` saves file Sends) |
-| `r` | Reveal secrets in detail (15s) / restore from trash |
-| `n` / `e` / `d` / `f` | New item (login, note, card, identity, SSH) / edit / delete / favorite |
-| `Shift+M` | Move selected item to folder |
-| `g` | Generator (password / passphrase / username; org policy clamps options) |
-| `R` → `h` | Vault health; opt-in HIBP password breach counts (k-anonymity, network) |
-| `R` → `e` | Opt-in HIBP email breach lookup (needs `BW_TUI_HIBP_API_KEY`; sends emails to haveibeenpwned.com) |
-| `Ctrl+s` | Sync vault (status bar shows sync age, e.g. `Synced 5m ago`) |
-| `Ctrl+l` | Lock |
-| `Ctrl+p` | Profile manager |
-| `e` | Edit selected profile (in profile manager) |
-| `L` | Toggle lock-on-switch (in profile manager) |
-| `Ctrl+o` | Sign out current profile (unlock) |
-| `Ctrl+n` | New folder |
-| `Home` / `End` / `PgUp` / `PgDn` | Jump / page selection |
+| `j` `k` / `↓` `↑` | Move (scrolls when the detail pane is focused) |
+| `h` `l` / `←` `→` / `Tab` | Switch pane |
+| `Ctrl+d` `Ctrl+u` / `PgDn` `PgUp` | Page |
+| `g g` / `G` (also `Home` / `End`) | First / last |
+| `g` then `a` `f` `l` `n` `c` `i` `k` `s` `t` | Go to All / Favorites / Logins / Notes / Cards / Identities / SSH keys / Sends / Trash (a popup lists the targets) |
+| `/` | Search (`type:login`, `folder:work`, `name:foo`, `url:github.com`, …); `Ctrl+n` / `Ctrl+p` move through results, `Enter` keeps the filter |
+| `c` `y` `t` `u` `o` | Copy password / username / TOTP / URI / notes |
+| `m` `v` `x` · `p` `b` · `1`–`9` | Copy card number / CVC / expiry · SSH public / private key · custom field |
+| `S` | Copy sequence: username → password → TOTP |
+| `n` `e` `d` | New / edit / delete (folder when the Folders pane is focused, Send in the Sends view) |
+| `f` `r` `Space` | Favorite / reveal secrets (15s) / mark for bulk delete or share |
+| `C` `M` `O` | Clone / move to folder / share to organization |
+| `U` | Undo last delete |
+| `E` `F` `V` `A` `H` `Q` | Notes in `$EDITOR` / custom fields / attachments / upload attachment / password history / QR code |
+| `a` `T` | Auto-type login / TOTP into the focused window |
+| `s` | Cycle sort: name / recently used / modified |
+| `r` `X` (Trash) | Restore / empty trash |
+| `c` `o` (Sends) | Copy Send link / open a received Send link |
+| `P` `R` `D` `,` | Generator / health report / domain rules / account settings |
+| `Ctrl+s` `Ctrl+l` `Ctrl+n` `Ctrl+p` | Sync / lock / new folder / profiles |
+| `:` or `Ctrl+k` | Command palette (every command, with its key) |
 | `?` | Help |
-| `q` | Quit |
+| `q` | Quit (press twice while a live vault is unlocked) |
 
-Press `?` in the app for the full map. Use `--mock` for UI-only demos without a server.
+Login: `Ctrl+h` show password · `Ctrl+r` remember · `Ctrl+a` API-key login · `F1` help. Unlock: `Tab` PIN · `Ctrl+o` sign out. Forms: `Tab` fields · `Ctrl+s` save · `Ctrl+g` generate · `Ctrl+e` `$EDITOR` · `Esc` cancel.
+
+### Rebinding keys
+
+Vault-browser keys can be changed in `config.toml`. `keys` takes one or more keys separated by spaces, or `none` to unbind. A key you assign is taken away from whichever default had it:
+
+```toml
+[[keybindings.overrides]]
+action = "open_generator"
+keys = "g F2"            # the go-to prefix loses `g`
+
+[[keybindings.overrides]]
+action = "quit"
+keys = "Ctrl+q"
+```
+
+Action names are the snake_case form of the palette entries (`copy_password`, `toggle_favorite`, `goto_prefix`, `receive_send`, …). Conflicts and unknown names are reported as warnings at startup.
 
 ### Scripting CLI
 

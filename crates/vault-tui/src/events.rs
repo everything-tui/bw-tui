@@ -2,12 +2,14 @@
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
+use crate::action::{Action, GOTO_TARGETS};
 use crate::app::{
     writable_share_collections, App, CardField, ChangePasswordField, ClipboardKind, EditField,
     FocusPane, FormUriLine, IdentityField, LoginAuthMode, LoginField, NoteField, Overlay,
     PendingAction, PinSetupField, ProfileEditField, ProfileManagerMode, Screen, ShareToOrgStep,
     SshKeyField,
 };
+use crate::keybinds::KeyContext;
 use crate::profiles::format_auto_lock_input;
 
 /// True for printable typing (letters, digits, punctuation), including Shift.
@@ -66,16 +68,22 @@ async fn handle_key(
             KeyCode::Char('k') | KeyCode::Up => {
                 app.help_scroll = app.help_scroll.saturating_sub(1);
             }
-            KeyCode::PageDown => {
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                app.help_scroll = app.help_scroll.saturating_add(10);
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.help_scroll = app.help_scroll.saturating_add(10);
             }
             KeyCode::PageUp => {
                 app.help_scroll = app.help_scroll.saturating_sub(10);
             }
-            KeyCode::Home => {
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.help_scroll = app.help_scroll.saturating_sub(10);
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
                 app.help_scroll = 0;
             }
-            KeyCode::End => {
+            KeyCode::End | KeyCode::Char('G') => {
                 // Draw clamps to content; jump far enough for any terminal size.
                 app.help_scroll = usize::MAX / 4;
             }
@@ -87,6 +95,7 @@ async fn handle_key(
     if key.code == KeyCode::Char('p')
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(app.overlay, Overlay::None)
+        && app.screen != Screen::Vault
     {
         app.open_profile_manager();
         return false;
@@ -315,6 +324,23 @@ async fn handle_unlock(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
+/// Pane visibility for the current terminal width.
+#[derive(Debug, Clone, Copy)]
+pub struct Panes {
+    pub detail: bool,
+    pub folders: bool,
+}
+
+impl Panes {
+    fn from_app(app: &App) -> Self {
+        let vis = crate::ui::PaneVisibility::from_width(app.power.view_size.get().0);
+        Self {
+            detail: vis.detail,
+            folders: vis.folders,
+        }
+    }
+}
+
 async fn handle_vault(
     app: &mut App,
     key: KeyEvent,
@@ -324,258 +350,202 @@ async fn handle_vault(
     if app.searching {
         return handle_search(app, key);
     }
+    let panes = Panes {
+        detail: detail_visible,
+        folders: folders_visible,
+    };
+    // Any key other than a second `q` disarms quitting.
+    let quit_armed = std::mem::take(&mut app.quit_armed);
 
-    if let Some(quit) = crate::power_events::handle_vault_key(app, &key).await {
-        return quit;
+    if std::mem::take(&mut app.pending_goto) {
+        if let KeyCode::Char(c) = key.code {
+            if let Some((_, action)) = GOTO_TARGETS.iter().find(|(k, _)| *k == c) {
+                return dispatch(app, *action, panes, quit_armed).await;
+            }
+        }
+        return false;
     }
 
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('s') => {
-                if !app.busy {
-                    app.sync_vault().await;
-                }
-                return false;
-            }
-            KeyCode::Char('l') => {
-                app.lock();
-                return false;
-            }
-            KeyCode::Char('n') => {
-                app.open_folder_form();
-                return false;
-            }
-            KeyCode::Char('k') => {
-                app.open_command_palette();
-                return false;
-            }
-            _ => {}
-        }
+    let ctx = KeyContext {
+        sends: viewing_sends(app),
+        trash: app.in_trash(),
+    };
+    if let Some(action) = app.keymap.action_for(&key, ctx) {
+        return dispatch(app, action, panes, quit_armed).await;
     }
 
-    match key.code {
-        KeyCode::Char('q') if is_typing(&key) => {
-            if app.screen == Screen::Vault && !app.using_mock {
-                app.set_status("Press Ctrl+c to quit (vault unlocked)");
-                return false;
+    // Fixed keys: 1–9 copy the matching custom field.
+    if let KeyCode::Char(c @ '1'..='9') = key.code {
+        if is_typing(&key) && !ctx.sends {
+            app.copy_custom_field((c as u8 - b'1') as usize);
+        }
+    }
+    false
+}
+
+fn viewing_sends(app: &App) -> bool {
+    matches!(app.current_filter(), crate::models::FilterKind::Sends)
+}
+
+/// Execute a vault-screen action. Shared by key presses and the command palette.
+/// Returns `true` when the app should quit.
+pub async fn dispatch(app: &mut App, action: Action, panes: Panes, quit_armed: bool) -> bool {
+    let sends = viewing_sends(app);
+    let folders_focused = app.focus == FocusPane::Folders;
+    let detail_focused = app.focus == FocusPane::Detail;
+    match action {
+        // --- Navigate ---
+        Action::MoveDown if detail_focused => app.scroll_detail(Some(1)),
+        Action::MoveUp if detail_focused => app.scroll_detail(Some(-1)),
+        Action::PageDown if detail_focused => app.scroll_detail(Some(10)),
+        Action::PageUp if detail_focused => app.scroll_detail(Some(-10)),
+        Action::Top if detail_focused => app.scroll_detail(None),
+        Action::Bottom if detail_focused => app.scroll_detail(Some(isize::MAX / 2)),
+        Action::MoveDown => app.move_selection(1),
+        Action::MoveUp => app.move_selection(-1),
+        Action::PageDown => app.move_selection(10),
+        Action::PageUp => app.move_selection(-10),
+        Action::Top => app.select_edge(false),
+        Action::Bottom => app.select_edge(true),
+        Action::FocusLeft => app.focus_left(panes.folders),
+        Action::FocusRight => app.focus_right(panes.detail),
+        Action::FocusNext => app.focus_next(panes.detail, panes.folders),
+        Action::FocusPrev => app.focus_prev(panes.detail, panes.folders),
+        Action::Open => match app.focus {
+            FocusPane::Folders => app.focus = FocusPane::Items,
+            FocusPane::Items if panes.detail => app.focus = FocusPane::Detail,
+            FocusPane::Items | FocusPane::Detail => {
+                return Box::pin(dispatch(app, Action::Edit, panes, false)).await;
             }
-            app.should_quit = true;
-            return true;
-        }
-        KeyCode::Char('?') if is_typing(&key) => {
-            app.show_help = true;
-            app.help_scroll = 0;
-        }
-        KeyCode::Tab => {
-            app.focus_next(detail_visible, folders_visible);
-        }
-        KeyCode::BackTab => {
-            app.focus_prev(detail_visible, folders_visible);
-        }
-        KeyCode::Char('h') | KeyCode::Left if is_typing(&key) || key.code == KeyCode::Left => {
-            app.focus_left(folders_visible);
-        }
-        KeyCode::Char('l') | KeyCode::Right if is_typing(&key) || key.code == KeyCode::Right => {
-            app.focus_right(detail_visible);
-        }
-        KeyCode::Char('j') | KeyCode::Down if is_typing(&key) || key.code == KeyCode::Down => {
-            app.move_selection(1);
-        }
-        KeyCode::Char('k') | KeyCode::Up if is_typing(&key) || key.code == KeyCode::Up => {
-            app.move_selection(-1);
-        }
-        KeyCode::Char('/') if is_typing(&key) => {
-            app.start_search();
-        }
-        KeyCode::Esc => {
-            if !app.search_query.is_empty() {
+        },
+        Action::Back => {
+            if app.focus != FocusPane::Items {
+                app.focus = FocusPane::Items;
+            } else if !app.search_query.is_empty() {
                 app.clear_search();
+            } else if !app.selected_ids.is_empty() {
+                app.selected_ids.clear();
+                app.set_status("Marks cleared");
             }
         }
-        KeyCode::Char('n') if is_typing(&key) => {
-            if matches!(app.current_filter(), crate::models::FilterKind::Sends) {
-                app.open_send_form();
-            } else {
-                app.open_new_item_picker();
+        Action::SearchStart => app.start_search(),
+        Action::GotoPrefix => app.pending_goto = true,
+        Action::GotoAll
+        | Action::GotoFavorites
+        | Action::GotoLogins
+        | Action::GotoNotes
+        | Action::GotoCards
+        | Action::GotoIdentities
+        | Action::GotoSshKeys
+        | Action::GotoSends
+        | Action::GotoTrash => {
+            if let Some(kind) = action.goto_filter() {
+                app.goto_filter(&kind);
             }
         }
-        KeyCode::Char(',') if is_typing(&key) => {
-            app.open_account_settings();
-        }
-        KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::SHIFT) && is_typing(&key) => {
-            app.queue(PendingAction::CloneItem);
-        }
-        KeyCode::Char('e') if is_typing(&key) => {
-            if app.focus == FocusPane::Folders {
-                app.open_rename_folder_form();
-            } else if matches!(app.current_filter(), crate::models::FilterKind::Sends) {
-                app.open_edit_send();
-            } else {
-                app.open_edit_item();
-            }
-        }
-        KeyCode::Enter => {
-            if app.in_trash() {
-                if !app.busy {
-                    app.restore_selected().await;
-                }
-            } else {
-                app.open_edit_item();
-            }
-        }
-        KeyCode::Char('M') if key.modifiers.contains(KeyModifiers::SHIFT) && is_typing(&key) => {
-            app.open_move_to_folder();
-        }
-        KeyCode::Char('O') if key.modifiers.contains(KeyModifiers::SHIFT) && is_typing(&key) => {
-            app.open_share_to_org();
-        }
-        KeyCode::Char(' ') if is_typing(&key) => {
-            app.toggle_bulk_select_current();
-        }
-        KeyCode::Char('d') if is_typing(&key) => {
-            if app.focus == FocusPane::Folders {
-                app.open_delete_folder_confirm();
-            } else if matches!(app.current_filter(), crate::models::FilterKind::Sends) {
-                app.open_delete_send_confirm();
-            } else {
-                app.open_delete_confirm();
-            }
-        }
-        KeyCode::Char('u') if is_typing(&key) => {
-            if app.pending_undo.is_some() {
-                app.undo_delete().await;
-            }
-        }
-        KeyCode::Char('X') if is_typing(&key) && app.in_trash() => {
-            app.open_empty_trash_confirm();
-        }
-        KeyCode::Char('F') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.open_custom_fields_editor();
-        }
-        KeyCode::Char('L')
-            if is_typing(&key)
-                && matches!(app.current_filter(), crate::models::FilterKind::Sends) =>
-        {
-            app.copy_send_link();
-        }
-        KeyCode::Char('O') if is_typing(&key) => {
-            app.open_receive_send();
-        }
-        KeyCode::Char('f') if is_typing(&key) => {
+
+        // --- Copy ---
+        Action::CopyPassword => app.copy_field(ClipboardKind::Password),
+        Action::CopyUsername => app.copy_field(ClipboardKind::Username),
+        Action::CopyTotp => app.copy_field(ClipboardKind::Totp),
+        Action::CopyUri => app.copy_field(ClipboardKind::Uri),
+        Action::CopyNotes => app.copy_field(ClipboardKind::Notes),
+        Action::CopyCardNumber => app.copy_field(ClipboardKind::CardNumber),
+        Action::CopyCardCode => app.copy_field(ClipboardKind::CardCode),
+        Action::CopyCardExpiry => app.copy_field(ClipboardKind::CardExpiry),
+        Action::CopySshPublic => app.copy_field(ClipboardKind::SshPublic),
+        Action::CopySshPrivate => app.copy_field(ClipboardKind::SshPrivate),
+        Action::CopySequence => app.copy_sequence_step(),
+
+        // --- Item (New / Edit / Delete act on whatever is focused) ---
+        Action::New if folders_focused => app.open_folder_form(),
+        Action::New if sends => app.open_send_form(),
+        Action::New => app.open_new_item_picker(),
+        Action::Edit if folders_focused => app.open_rename_folder_form(),
+        Action::Edit if sends => app.open_edit_send(),
+        Action::Edit => app.open_edit_item(),
+        Action::Delete if folders_focused => app.open_delete_folder_confirm(),
+        Action::Delete if sends => app.open_delete_send_confirm(),
+        Action::Delete => app.open_delete_confirm(),
+        Action::ToggleFavorite => {
             if !app.busy {
                 app.toggle_favorite().await;
             }
         }
-        KeyCode::Char('g') if is_typing(&key) => {
-            app.open_generator(false);
-        }
-        KeyCode::Char('H') if is_typing(&key) => {
-            app.open_password_history();
-        }
-        KeyCode::Char('R') if is_typing(&key) => {
-            app.open_health_report();
-        }
-        KeyCode::Char(':') if is_typing(&key) => {
-            app.open_command_palette();
-        }
-        KeyCode::Char(c @ '1'..='9') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.copy_custom_field((c as u8 - b'1') as usize);
-        }
-        KeyCode::Char('c') if is_typing(&key) => {
-            app.copy_field(ClipboardKind::Password);
-        }
-        KeyCode::Char('y') if is_typing(&key) => {
-            app.copy_field(ClipboardKind::Username);
-        }
-        KeyCode::Char('t') if is_typing(&key) => {
-            app.copy_field(ClipboardKind::Totp);
-        }
-        KeyCode::Char('u') if is_typing(&key) => {
-            app.copy_field(ClipboardKind::Uri);
-        }
-        KeyCode::Char('m') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.copy_field(ClipboardKind::CardNumber);
-        }
-        KeyCode::Char('v') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.copy_field(ClipboardKind::CardCode);
-        }
-        KeyCode::Char('x') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.copy_field(ClipboardKind::CardExpiry);
-        }
-        KeyCode::Char('p') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.copy_field(ClipboardKind::SshPublic);
-        }
-        KeyCode::Char('b') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.copy_field(ClipboardKind::SshPrivate);
-        }
-        KeyCode::Char(c @ '1'..='9')
-            if key.modifiers.contains(KeyModifiers::CONTROL) && app.focus == FocusPane::Detail =>
-        {
-            let idx = (c as u8 - b'1') as usize;
-            app.download_attachment_at(idx).await;
-        }
-        KeyCode::Char(c @ '1'..='9')
-            if key
-                .modifiers
-                .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-                && app.focus == FocusPane::Detail =>
-        {
-            let idx = (c as u8 - b'1') as usize;
-            app.open_delete_attachment_confirm(idx);
-        }
-        KeyCode::Char('A') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.open_attachment_upload();
-        }
-        KeyCode::Char('o') if is_typing(&key) && app.focus == FocusPane::Detail => {
-            app.copy_field(ClipboardKind::Notes);
-        }
-        KeyCode::Char('r') if is_typing(&key) => {
-            if app.in_trash() {
-                if !app.busy {
-                    app.restore_selected().await;
-                }
+        Action::ToggleReveal => app.toggle_reveal(),
+        Action::ToggleMark => app.toggle_bulk_select_current(),
+        Action::CloneItem => app.queue(PendingAction::CloneItem),
+        Action::MoveToFolder => app.open_move_to_folder(),
+        Action::ShareToOrg => app.open_share_to_org(),
+        Action::UndoDelete => {
+            if app.pending_undo.is_some() {
+                app.undo_delete().await;
             } else {
-                app.toggle_reveal();
+                app.set_status("Nothing to undo");
             }
         }
-        KeyCode::Home => {
-            match app.focus {
-                FocusPane::Folders => {
-                    app.selected_sidebar = 0;
-                    app.selected_item = 0;
-                    app.recompute_visible();
-                }
-                FocusPane::Items | FocusPane::Detail => {
-                    app.selected_item = 0;
-                }
+        Action::EditNotesExternal => app.request_notes_editor(),
+        Action::EditCustomFields => app.open_custom_fields_editor(),
+        Action::Attachments => app.open_attachments_overlay(),
+        Action::UploadAttachment => app.open_attachment_upload(),
+        Action::PasswordHistory => app.open_password_history(),
+        Action::ShowQr => app.open_qr(),
+        Action::AutoType => app.start_autotype(false),
+        Action::AutoTypeTotp => app.start_autotype(true),
+        Action::CycleSort => app.cycle_sort(),
+        Action::Restore => {
+            if !app.in_trash() {
+                app.set_status("Restore works in Trash (g t)");
+            } else if !app.busy {
+                app.restore_selected().await;
             }
-            app.touch();
         }
-        KeyCode::End => {
-            match app.focus {
-                FocusPane::Folders => {
-                    app.selected_sidebar = app.sidebar.len().saturating_sub(1);
-                    app.selected_item = 0;
-                    app.recompute_visible();
-                }
-                FocusPane::Items | FocusPane::Detail => {
-                    app.selected_item = app.visible.len().saturating_sub(1);
-                }
+        Action::EmptyTrash => app.open_empty_trash_confirm(),
+
+        // --- Sends ---
+        Action::NewSend => app.open_send_form(),
+        Action::CopySendLink => app.copy_send_link(),
+        Action::ReceiveSend => app.open_receive_send(),
+
+        // --- App ---
+        Action::OpenGenerator => app.open_generator(false),
+        Action::OpenHealthReport => app.open_health_report(),
+        Action::DomainRules => {
+            if !app.busy {
+                app.open_domain_rules().await;
             }
-            app.touch();
         }
-        KeyCode::PageDown => {
-            app.move_selection(10);
+        Action::AccountSettings => app.open_account_settings(),
+        Action::NewFolder => app.open_folder_form(),
+        Action::Sync => {
+            if !app.busy {
+                app.sync_vault().await;
+            }
         }
-        KeyCode::PageUp => {
-            app.move_selection(-10);
+        Action::Lock => app.lock(),
+        Action::OpenProfileManager => app.open_profile_manager(),
+        Action::SignOutProfile => app.sign_out_current_profile(),
+        Action::OpenCommandPalette => app.open_command_palette(),
+        Action::ToggleHelp => {
+            app.show_help = true;
+            app.help_scroll = 0;
         }
-        _ => {}
+        Action::Quit => {
+            // An unlocked live vault needs a second press, so a stray `q` can't drop the session.
+            if app.using_mock || quit_armed {
+                app.should_quit = true;
+                return true;
+            }
+            app.quit_armed = true;
+            let key = app.keymap.label(Action::Quit);
+            app.set_status(format!("Press {key} again to quit"));
+        }
     }
     false
 }
 
 fn handle_search(app: &mut App, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
             app.clear_search();
@@ -585,6 +555,14 @@ fn handle_search(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Backspace | KeyCode::Delete => {
             app.search_query.pop();
+            app.recompute_visible();
+            app.touch();
+        }
+        // fzf-style result navigation without leaving the query.
+        KeyCode::Char('n' | 'j') if ctrl => app.move_selection(1),
+        KeyCode::Char('p' | 'k') if ctrl => app.move_selection(-1),
+        KeyCode::Char('u') if ctrl => {
+            app.search_query.clear();
             app.recompute_visible();
             app.touch();
         }
@@ -619,7 +597,7 @@ async fn handle_overlay(app: &mut App, key: KeyEvent) -> bool {
         Overlay::ConfirmDelete { .. } => handle_confirm_delete(app, key).await,
         Overlay::Reprompt { .. } => handle_reprompt(app, key),
         Overlay::ProfileManager { .. } => handle_profile_manager(app, key).await,
-        Overlay::CommandPalette { .. } => handle_command_palette(app, key),
+        Overlay::CommandPalette { .. } => handle_command_palette(app, key).await,
         Overlay::PasswordHistory => handle_password_history(app, key),
         Overlay::HealthReport { .. } => handle_health_report(app, key),
         Overlay::AccountSettings { .. } => handle_account_settings(app, key).await,
@@ -1789,27 +1767,27 @@ async fn handle_confirm_delete(app: &mut App, key: KeyEvent) -> bool {
     }
 }
 
-fn handle_command_palette(app: &mut App, key: KeyEvent) -> bool {
-    use crate::action::Action;
+async fn handle_command_palette(app: &mut App, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let step: isize = match key.code {
+        KeyCode::Down | KeyCode::Tab => 1,
+        KeyCode::Up | KeyCode::BackTab => -1,
+        KeyCode::Char('n' | 'j') if ctrl => 1,
+        KeyCode::Char('p' | 'k') if ctrl => -1,
+        _ => 0,
+    };
+    if step != 0 {
+        let n = app.palette_filtered_actions().len();
+        if let Overlay::CommandPalette { selected, .. } = &mut app.overlay {
+            if n > 0 {
+                *selected = (*selected as isize + step).rem_euclid(n as isize) as usize;
+            }
+        }
+        return false;
+    }
     match key.code {
         KeyCode::Esc => {
             app.close_overlay();
-        }
-        KeyCode::Down => {
-            let n = app.palette_filtered_actions().len();
-            if let Overlay::CommandPalette { selected, .. } = &mut app.overlay {
-                if n > 0 {
-                    *selected = (*selected + 1) % n;
-                }
-            }
-        }
-        KeyCode::Up => {
-            let n = app.palette_filtered_actions().len();
-            if let Overlay::CommandPalette { selected, .. } = &mut app.overlay {
-                if n > 0 {
-                    *selected = if *selected == 0 { n - 1 } else { *selected - 1 };
-                }
-            }
         }
         KeyCode::Backspace | KeyCode::Delete => {
             if let Overlay::CommandPalette {
@@ -1832,16 +1810,14 @@ fn handle_command_palette(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Enter => {
             let action = match &app.overlay {
                 Overlay::CommandPalette { selected, .. } => {
-                    app.palette_filtered_actions().get(*selected).cloned()
+                    app.palette_filtered_actions().get(*selected).copied()
                 }
                 _ => None,
             };
             if let Some(action) = action {
-                let keep_open = matches!(action, Action::OpenCommandPalette);
-                app.invoke_palette_action(action);
-                if !keep_open {
-                    app.close_overlay();
-                }
+                app.close_overlay();
+                let panes = Panes::from_app(app);
+                return dispatch(app, action, panes, true).await;
             }
         }
         _ => {}

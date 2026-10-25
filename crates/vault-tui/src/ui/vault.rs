@@ -401,6 +401,14 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
 
     let [body, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     let width = body.width;
+    // Copy-key labels next to fields follow the live keymap.
+    let key = |a: crate::action::Action| app.keymap.label(a);
+    let (k_user, k_pass, k_totp, k_uri) = (
+        key(crate::action::Action::CopyUsername),
+        key(crate::action::Action::CopyPassword),
+        key(crate::action::Action::CopyTotp),
+        key(crate::action::Action::CopyUri),
+    );
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
@@ -437,16 +445,22 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
 
     match item.item_type {
         ItemType::Login => {
-            kv(&mut lines, width, "Username", item.username.as_deref(), "y");
+            kv(
+                &mut lines,
+                width,
+                "Username",
+                item.username.as_deref(),
+                &k_user,
+            );
             if app.reveal_secrets {
                 if let Some(pw) = item.password.as_deref() {
-                    kv_password(&mut lines, width, "Password", pw, "c");
+                    kv_password(&mut lines, width, "Password", pw, &k_pass);
                 } else {
-                    kv(&mut lines, width, "Password", None, "c");
+                    kv(&mut lines, width, "Password", None, &k_pass);
                 }
             } else {
                 let pw = item.password.as_deref().map(|_| "••••••••••");
-                kv(&mut lines, width, "Password", pw, "c");
+                kv(&mut lines, width, "Password", pw, &k_pass);
             }
             let totp_label = if let Some(display) = totp_now {
                 let secs = display.remaining;
@@ -458,12 +472,16 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 item.totp.as_ref().map(|_| "configured".to_string())
             };
-            kv(&mut lines, width, "TOTP", totp_label.as_deref(), "t");
+            kv(&mut lines, width, "TOTP", totp_label.as_deref(), &k_totp);
             if item.uris.is_empty() {
-                kv(&mut lines, width, "Website", None, "u");
+                kv(&mut lines, width, "Website", None, &k_uri);
             }
             for (i, uri) in item.uris.iter().enumerate() {
-                let (label, key) = if i == 0 { ("Website", "u") } else { ("", "") };
+                let (label, key) = if i == 0 {
+                    ("Website", k_uri.as_str())
+                } else {
+                    ("", "")
+                };
                 let mt = uri.match_type.unwrap_or(0);
                 let display = if mt == 0 {
                     uri.uri.clone()
@@ -528,7 +546,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 masked_owned.as_deref()
             };
-            kv(&mut lines, width, "Number", number, "m");
+            kv(
+                &mut lines,
+                width,
+                "Number",
+                number,
+                &key(crate::action::Action::CopyCardNumber),
+            );
             if let Some(num) = item.card_number.as_deref() {
                 if app.reveal_secrets && !vault_session::luhn_valid(num) {
                     lines.push(Line::from(Span::styled(
@@ -539,7 +563,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             }
             if let (Some(m), Some(y)) = (&item.card_exp_month, &item.card_exp_year) {
                 let exp = format!("{m}/{y}");
-                kv(&mut lines, width, "Expires", Some(&exp), "x");
+                kv(
+                    &mut lines,
+                    width,
+                    "Expires",
+                    Some(&exp),
+                    &key(crate::action::Action::CopyCardExpiry),
+                );
                 if vault_session::card_is_expired(m, y) {
                     lines.push(Line::from(Span::styled(
                         "  ⚠ Card expired",
@@ -557,7 +587,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 item.card_code.as_deref().map(|_| "***")
             };
-            kv(&mut lines, width, "CVC", code, "v");
+            kv(
+                &mut lines,
+                width,
+                "CVC",
+                code,
+                &key(crate::action::Action::CopyCardCode),
+            );
         }
         ItemType::Identity => {
             kv(
@@ -635,14 +671,20 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                 width,
                 "Public key",
                 item.ssh_public_key.as_deref(),
-                "p",
+                &key(crate::action::Action::CopySshPublic),
             );
             let priv_key = if app.reveal_secrets {
                 item.ssh_private_key.as_deref()
             } else {
                 item.ssh_private_key.as_ref().map(|_| "[hidden]")
             };
-            kv(&mut lines, width, "Private key", priv_key, "b");
+            kv(
+                &mut lines,
+                width,
+                "Private key",
+                priv_key,
+                &key(crate::action::Action::CopySshPrivate),
+            );
             kv(
                 &mut lines,
                 width,
@@ -661,13 +703,15 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
         )));
         for (i, (_, name)) in app.detail_attachments.iter().enumerate() {
-            lines.push(Line::from(format!(
-                "  {}. {name} (Ctrl+{i} download · Ctrl+Shift+{i} delete)",
-                i + 1
-            )));
+            lines.push(Line::from(format!("  {}. {name}", i + 1)));
         }
+        let km = &app.keymap;
         lines.push(Line::from(Span::styled(
-            "A upload attachment path",
+            format!(
+                "{} open · save · delete   {} upload",
+                km.label(crate::action::Action::Attachments),
+                km.label(crate::action::Action::UploadAttachment)
+            ),
             Style::default().fg(MUTED),
         )));
     }
@@ -680,10 +724,16 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
 
     if let Some(notes) = item.notes.as_deref().filter(|n| !n.trim().is_empty()) {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Notes",
-            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Notes  ",
+                Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                key(crate::action::Action::CopyNotes),
+                Style::default().fg(ACCENT),
+            ),
+        ]));
         for line in notes.lines() {
             lines.push(Line::from(Span::styled(
                 line.to_string(),
@@ -692,24 +742,62 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
-
-    let hint = |key: &'static str, label: &'static str| {
-        [
-            Span::styled(key, Style::default().fg(ACCENT)),
-            Span::styled(label, Style::default().fg(MUTED)),
-        ]
-    };
-    let footer_line = Line::from(
-        [
-            hint("c", " copy  "),
-            hint("y", " user  "),
-            hint("f", " fav  "),
-            hint("e", " edit"),
-        ]
-        .concat(),
+    // Wrapped height estimate; drives scroll clamping for j/k in the focused pane.
+    let wrap_w = body.width.max(1) as usize;
+    let content_h: usize = lines
+        .iter()
+        .map(|l| l.width().max(1).div_ceil(wrap_w))
+        .sum();
+    let viewport = body.height as usize;
+    let max_scroll = content_h.saturating_sub(viewport).min(u16::MAX as usize) as u16;
+    app.detail_scroll_max.set(max_scroll);
+    let scroll = app.detail_scroll_offset().min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        body,
     );
-    frame.render_widget(Paragraph::new(footer_line), footer);
+    if max_scroll > 0 {
+        let mut sb = ScrollbarState::new(max_scroll as usize + 1).position(scroll as usize);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some(" "))
+                .thumb_symbol("┃")
+                .thumb_style(Style::default().fg(if focused { ACCENT } else { MUTED })),
+            // The 1-col margin right of the text, inside the border.
+            body.offset(ratatui::layout::Offset { x: 1, y: 0 }),
+            &mut sb,
+        );
+    }
+
+    let km = &app.keymap;
+    let mut footer_spans = Vec::new();
+    let mut hint = |action: crate::action::Action, label: &str| {
+        let key = km.label(action);
+        if !key.is_empty() {
+            footer_spans.push(Span::styled(key, Style::default().fg(ACCENT)));
+            footer_spans.push(Span::styled(
+                format!(" {label}  "),
+                Style::default().fg(MUTED),
+            ));
+        }
+    };
+    use crate::action::Action;
+    if focused {
+        hint(Action::MoveDown, "scroll");
+        hint(Action::Open, "edit");
+    } else {
+        hint(Action::Edit, "edit");
+    }
+    hint(Action::ToggleReveal, "reveal");
+    hint(Action::ToggleFavorite, "fav");
+    if !app.detail_attachments.is_empty() {
+        hint(Action::Attachments, "files");
+    }
+    frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer);
 }
 
 /// `Label     value                      key` row with the copy key pinned right.
@@ -813,16 +901,37 @@ fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(clip, Style::default().fg(FAV)),
         Span::styled("lock ", Style::default().fg(MUTED)),
         Span::styled(lock, Style::default().fg(FG)),
-        Span::styled("  Ctrl+p ", Style::default().fg(ACCENT)),
-        Span::styled("profiles ", Style::default().fg(MUTED)),
-        Span::styled("? ", Style::default().fg(ACCENT)),
-        Span::styled("help ", Style::default().fg(MUTED)),
+        Span::raw("  "),
     ]);
-    let used: usize = left
-        .iter()
-        .chain(right.iter())
-        .map(|s| s.content.chars().count())
-        .sum();
+
+    let width_of =
+        |spans: &[Span]| -> usize { spans.iter().map(|s| s.content.chars().count()).sum() };
+    let mut budget = (area.width as usize).saturating_sub(width_of(&left) + width_of(&right));
+
+    // Context hints, most useful first; `? help` is always kept.
+    let km = &app.keymap;
+    let render = |(action, label): (crate::action::Action, String)| -> Option<Vec<Span<'static>>> {
+        let key = km.label(action);
+        (!key.is_empty()).then(|| {
+            vec![
+                Span::styled(key, Style::default().fg(ACCENT)),
+                Span::styled(format!(" {label}  "), Style::default().fg(MUTED)),
+            ]
+        })
+    };
+    let help = render((crate::action::Action::ToggleHelp, "help".into())).unwrap_or_default();
+    budget = budget.saturating_sub(width_of(&help));
+    for hint in context_hints(app).into_iter().filter_map(render) {
+        let w = width_of(&hint);
+        if w > budget {
+            break;
+        }
+        budget -= w;
+        right.extend(hint);
+    }
+    right.extend(help);
+
+    let used = width_of(&left) + width_of(&right);
     let mut spans = left;
     spans.push(Span::raw(
         " ".repeat((area.width as usize).saturating_sub(used)),
@@ -832,6 +941,77 @@ fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(STATUS_BG)),
         area,
     );
+}
+
+/// Key hints for the status bar, based on what has focus and what's selected.
+fn context_hints(app: &App) -> Vec<(crate::action::Action, String)> {
+    use crate::action::Action::*;
+    let h = |a, l: &str| (a, l.to_string());
+    if app.searching {
+        return vec![
+            h(Open, "done"),
+            h(Back, "clear"),
+            h(MoveDown, "next result"),
+        ];
+    }
+    if app.focus == FocusPane::Folders {
+        return vec![
+            h(Open, "open"),
+            h(New, "new folder"),
+            h(Edit, "rename"),
+            h(Delete, "delete"),
+            h(GotoPrefix, "go to"),
+        ];
+    }
+    if matches!(app.current_filter(), FilterKind::Sends) {
+        return vec![
+            h(New, "new"),
+            h(CopySendLink, "copy link"),
+            h(Edit, "edit"),
+            h(Delete, "delete"),
+            h(ReceiveSend, "open link"),
+        ];
+    }
+    if !app.selected_ids.is_empty() {
+        return vec![
+            h(ToggleMark, "mark"),
+            (Delete, format!("delete {}", app.selected_ids.len())),
+            h(ShareToOrg, "share"),
+            h(Back, "clear marks"),
+        ];
+    }
+    if app.in_trash() {
+        return vec![
+            h(Restore, "restore"),
+            h(Delete, "delete"),
+            h(EmptyTrash, "empty trash"),
+        ];
+    }
+    if app.focus == FocusPane::Detail {
+        return vec![
+            h(MoveDown, "scroll"),
+            h(Open, "edit"),
+            h(CopyPassword, "pass"),
+            h(CopyUsername, "user"),
+            h(Back, "back"),
+        ];
+    }
+    let mut hints = vec![h(CopyPassword, "pass"), h(CopyUsername, "user")];
+    if app
+        .selected_decrypted()
+        .is_some_and(|i| i.totp.as_deref().is_some_and(|t| !t.is_empty()))
+    {
+        hints.push(h(CopyTotp, "totp"));
+    }
+    if app.pending_undo.is_some() {
+        hints.insert(0, h(UndoDelete, "undo"));
+    }
+    hints.extend([
+        h(SearchStart, "search"),
+        h(GotoPrefix, "go to"),
+        h(OpenCommandPalette, "commands"),
+    ]);
+    hints
 }
 
 fn selection_marker(focused: bool) -> Text<'static> {

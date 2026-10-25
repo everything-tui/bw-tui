@@ -38,6 +38,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         modals::draw_overlay(frame, app);
     }
 
+    if app.pending_goto && app.screen == Screen::Vault && matches!(app.overlay, Overlay::None) {
+        help::draw_goto_hint(frame, app);
+    }
+
     if app.show_help {
         help::draw_help(frame, app);
     }

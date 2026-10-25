@@ -4,15 +4,29 @@
 
 ### Changed
 
-- Help overlay (`?`) groups shortcuts by context (Global, Login, 2FA, Vault, …) with `j`/`k` scroll
+- **Reworked vault navigation and shortcuts** (see README → Keybindings):
+  - `g` is now a go-to prefix with a popup: `g g` top, `g f` favorites, `g t` trash, `g s` sends, … `G` jumps to the bottom. The password generator moved from `g` to `P`
+  - `Enter` drills in (folders → items → detail → edit); `Esc` steps back (pane → search → marks). The detail pane scrolls with `j`/`k` when focused
+  - Card / SSH / notes / custom-field copy keys (`m v x p b o 1–9`) and `F` / `A` work from the item list, not only from the detail pane
+  - Undo delete is `U`, so `u` always copies the URI. `s` always cycles sort; New Send is `n` in the Sends view (`g s`) or from the palette
+  - In the Sends view, `c` copies the link and `o` opens a received Send link. Previously `O` was meant to open it but Shift+O share always took the key first
+  - Attachments: Ctrl+digit keys (which most terminals don't send) are gone; `V` opens the attachments list, which now has `d` delete and `a` upload
+  - `q` quits after a second press while a live vault is unlocked, instead of refusing
+  - Search: `Ctrl+n` / `Ctrl+p` move through results, `Ctrl+u` clears the query
+- Status bar shows key hints for the focused pane / view (items, detail, folders, trash, sends, marked items, search)
+- Command palette lists every command with its key and runs it directly. Many entries used to only say "use the keyboard shortcut". It also matches on key names and scrolls past the first page
+- Help overlay is generated from the live keymap and puts the current screen first
 - TUI New Send is a Quick create overlay (content + optional password; `Enter` saves; auto name). Tab to **Advanced…** (or `a` before typing) for the full field list; edit (`e`) still opens the full form
-- With the left sidebar focused, `s` opens Quick New Send; with items/detail focused, `s` still cycles sort
+
+### Fixed
+
+- `[keybindings]` overrides in `config.toml` were parsed but never applied; they now drive the vault browser, palette, help and hints. Letter case is significant (`c` ≠ `C`), and an action can have several keys
 
 ### Added
 
 - Feature-gap roadmap P0–P5: themes/keybinds, Sends+receive, zxcvbn/health/revision sync, multi-format import/export, timeout/sleep lock + org policies, org share/bulk, 2FA picker + account tools, power-user TUI (QR/editor/autotype/toasts/watchtower/domain rules), CLI unlock daemon / serve / CRUD / completions
 - Full Sends: file Sends (client-side encrypted upload via `POST /sends/file/v2`, direct + Azure upload types), password protection (PBKDF2-SHA256, 100k iterations, send key as salt), max access count, expiration/deletion dates (default deletion 7 days, max 31), hide email (respects org policy), disable, notes; TUI Send form + detail pane expanded; `Session::{create_send, create_file_send, update_send}`
-- Receive a Send: `POST /sends/access/{id}` (+ file download endpoint), decrypt with the URL-fragment key (HKDF salt `bitwarden-send`); TUI "Open Send link" overlay (`O` / palette) and CLI `receive <url>` (works without a saved session)
+- Receive a Send: `POST /sends/access/{id}` (+ file download endpoint), decrypt with the URL-fragment key (HKDF salt `bitwarden-send`); TUI "Open Send link" overlay (`o` in the Sends view / palette) and CLI `receive <url>` (works without a saved session)
 
 ## [0.1.0] - 2026-10-12
 

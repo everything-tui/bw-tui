@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, DomainInput, FocusPane, Overlay, PowerOverlay, Screen};
+use crate::app::{App, DomainInput, Overlay, PowerOverlay};
 use vault_session::{format_domain_group, parse_domain_group};
 
 fn is_typing(key: &KeyEvent) -> bool {
@@ -12,38 +12,6 @@ fn is_typing(key: &KeyEvent) -> bool {
 
 fn ctrl(key: &KeyEvent, c: char) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(c)
-}
-
-/// New vault-browser shortcuts. Returns `Some(quit)` when the key was consumed.
-///
-/// `a` auto-type · `T` type TOTP · `S` copy sequence · `Q` QR · `E` edit notes in `$EDITOR` ·
-/// `s` Quick Send (sidebar) / sort cycle (items·detail) · `V` attachments · `D` domain rules.
-pub async fn handle_vault_key(app: &mut App, key: &KeyEvent) -> Option<bool> {
-    if app.screen != Screen::Vault || !is_typing(key) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('a') => app.start_autotype(false),
-        KeyCode::Char('T') => app.start_autotype(true),
-        KeyCode::Char('S') => app.copy_sequence_step(),
-        KeyCode::Char('Q') => app.open_qr(),
-        KeyCode::Char('E') => app.request_notes_editor(),
-        KeyCode::Char('s') => {
-            if app.focus == FocusPane::Folders {
-                app.open_send_form();
-            } else {
-                app.cycle_sort();
-            }
-        }
-        KeyCode::Char('V') => app.open_attachments_overlay(),
-        KeyCode::Char('D') => {
-            if !app.busy {
-                app.open_domain_rules().await;
-            }
-        }
-        _ => return None,
-    }
-    Some(false)
 }
 
 /// Shortcuts that work inside existing form overlays (before their own handlers).
@@ -179,6 +147,8 @@ async fn handle_attachments(app: &mut App, key: KeyEvent) {
         KeyCode::Char('s') if !app.busy => {
             app.download_attachment_at(selected).await;
         }
+        KeyCode::Char('d') | KeyCode::Delete => app.open_delete_attachment_confirm(selected),
+        KeyCode::Char('A') | KeyCode::Char('a') => app.open_attachment_upload(),
         _ => {}
     }
     app.touch();

@@ -873,6 +873,15 @@ pub struct App {
     pub keymap: KeyMap,
     /// Soft-delete undo window.
     pub pending_undo: Option<PendingUndoDelete>,
+    /// Detail pane scroll (j/k while it has focus), keyed by item id so a new
+    /// selection starts at the top.
+    pub detail_scroll: (Option<String>, u16),
+    /// Largest useful detail scroll, measured at draw time.
+    pub detail_scroll_max: std::cell::Cell<u16>,
+    /// `g` was pressed; the next key picks a go-to target.
+    pub pending_goto: bool,
+    /// First `q` on an unlocked vault arms quitting; a second `q` quits.
+    pub quit_armed: bool,
     last_auto_sync: Instant,
     last_revision_check: Instant,
     /// Lazily started watcher for system sleep / screen lock.
@@ -1042,6 +1051,10 @@ impl App {
             config,
             keymap,
             pending_undo: None,
+            detail_scroll: (None, 0),
+            detail_scroll_max: std::cell::Cell::new(0),
+            pending_goto: false,
+            quit_armed: false,
             last_auto_sync: Instant::now(),
             last_revision_check: Instant::now(),
             system_lock: None,
@@ -2615,6 +2628,73 @@ impl App {
         self.touch();
     }
 
+    /// Detail pane scroll offset for the current selection.
+    pub fn detail_scroll_offset(&self) -> u16 {
+        match &self.detail_scroll {
+            (Some(id), off) if self.selected_id().as_deref() == Some(id.as_str()) => *off,
+            _ => 0,
+        }
+    }
+
+    /// Scroll the detail pane; `None` jumps to the top.
+    pub fn scroll_detail(&mut self, delta: Option<isize>) {
+        let current = self.detail_scroll_offset() as isize;
+        let max = self.detail_scroll_max.get() as isize;
+        let next = match delta {
+            Some(d) => (current.min(max) + d).clamp(0, max) as u16,
+            None => 0,
+        };
+        self.detail_scroll = (self.selected_id(), next);
+        self.touch();
+    }
+
+    /// Jump to the first (`false`) or last (`true`) row of the focused list.
+    pub fn select_edge(&mut self, last: bool) {
+        match self.focus {
+            FocusPane::Folders => {
+                self.selected_sidebar = if last {
+                    self.sidebar.len().saturating_sub(1)
+                } else {
+                    0
+                };
+                self.selected_item = 0;
+                self.recompute_visible();
+            }
+            FocusPane::Items | FocusPane::Detail => {
+                let len = if matches!(self.current_filter(), FilterKind::Sends) {
+                    self.visible_sends.len()
+                } else {
+                    self.visible.len()
+                };
+                let prev_id = self.selected_id();
+                self.selected_item = if last { len.saturating_sub(1) } else { 0 };
+                if self.selected_id() != prev_id {
+                    self.reprompt_ok_for = None;
+                    self.refresh_detail_attachments();
+                }
+            }
+        }
+        self.touch();
+    }
+
+    /// Select the sidebar row for `kind` (used by the `g` go-to keys).
+    pub fn goto_filter(&mut self, kind: &FilterKind) {
+        let Some(idx) = self.sidebar.iter().position(|e| &e.kind == kind) else {
+            self.set_status("That view isn't available in this vault");
+            return;
+        };
+        if idx != self.selected_sidebar {
+            self.selected_sidebar = idx;
+            self.selected_item = 0;
+            self.recompute_visible();
+            self.refresh_detail_attachments();
+        }
+        if self.focus == FocusPane::Folders {
+            self.focus = FocusPane::Items;
+        }
+        self.touch();
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
         match self.focus {
             FocusPane::Folders => {
@@ -3968,7 +4048,8 @@ impl App {
                             item_name: name.clone(),
                             expires_at: Instant::now() + Duration::from_secs(8),
                         });
-                        self.set_status(format!("Deleted \"{name}\" — press u to undo"));
+                        let undo = self.keymap.label(crate::action::Action::UndoDelete);
+                        self.set_status(format!("Deleted \"{name}\" — press {undo} to undo"));
                     }
                     self.rebuild_sidebar();
                     self.recompute_visible();
@@ -3998,7 +4079,8 @@ impl App {
                                 item_name: name.clone(),
                                 expires_at: Instant::now() + Duration::from_secs(8),
                             });
-                            self.set_status(format!("Deleted \"{name}\" — press u to undo"));
+                            let undo = self.keymap.label(crate::action::Action::UndoDelete);
+                            self.set_status(format!("Deleted \"{name}\" — press {undo} to undo"));
                         }
                         self.touch();
                     }
@@ -4558,97 +4640,24 @@ impl App {
 
     pub fn palette_filtered_actions(&self) -> Vec<crate::action::Action> {
         use crate::action::Action;
-        let Overlay::CommandPalette { query, .. } = &self.overlay else {
-            return Action::all().to_vec();
+        let all = Action::all().iter().copied().filter(|a| a.in_palette());
+        let query = match &self.overlay {
+            Overlay::CommandPalette { query, .. } => query.trim(),
+            _ => "",
         };
-        let q = query.trim();
-        if q.is_empty() {
-            return Action::all().to_vec();
+        if query.is_empty() {
+            return all.collect();
         }
         let matcher = SkimMatcherV2::default();
-        let mut scored: Vec<(i64, Action)> = Action::all()
-            .iter()
+        let mut scored: Vec<(i64, Action)> = all
             .filter_map(|a| {
-                matcher
-                    .fuzzy_match(a.label(), q)
-                    .map(|score| (score, a.clone()))
+                // Match the key too, so typing `ctrl+s` or `g t` finds its command.
+                let hay = format!("{} {}", a.label(), self.keymap.label(a));
+                matcher.fuzzy_match(&hay, query).map(|score| (score, a))
             })
             .collect();
         scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         scored.into_iter().map(|(_, a)| a).collect()
-    }
-
-    pub fn invoke_palette_action(&mut self, action: crate::action::Action) {
-        use crate::action::Action;
-        match action {
-            Action::Quit => self.should_quit = true,
-            Action::ToggleHelp => {
-                self.show_help = !self.show_help;
-                if self.show_help {
-                    self.help_scroll = 0;
-                }
-                self.close_overlay();
-            }
-            Action::OpenProfileManager => {
-                self.close_overlay();
-                self.open_profile_manager();
-            }
-            Action::Lock => {
-                self.close_overlay();
-                self.lock();
-            }
-            Action::Sync => self.set_status("Use Ctrl+s to sync the vault"),
-            Action::SearchStart => {
-                self.close_overlay();
-                self.start_search();
-            }
-            Action::SearchClear => self.clear_search(),
-            Action::CopyPassword => self.copy_field(ClipboardKind::Password),
-            Action::CopyUsername => self.copy_field(ClipboardKind::Username),
-            Action::CopyTotp => self.copy_field(ClipboardKind::Totp),
-            Action::CopyUri => self.copy_field(ClipboardKind::Uri),
-            Action::ToggleFavorite => self.set_status("Press f to toggle favorite"),
-            Action::ToggleReveal => self.toggle_reveal(),
-            Action::NewLogin => {
-                self.close_overlay();
-                self.open_new_login();
-            }
-            Action::EditItem => {
-                self.close_overlay();
-                self.open_edit_item();
-            }
-            Action::MoveToFolder => {
-                self.close_overlay();
-                self.open_move_to_folder();
-            }
-            Action::ShareToOrg => {
-                self.close_overlay();
-                self.open_share_to_org();
-            }
-            Action::DeleteItem => {
-                self.close_overlay();
-                self.open_delete_confirm();
-            }
-            Action::NewFolder => {
-                self.close_overlay();
-                self.open_folder_form();
-            }
-            Action::OpenGenerator => {
-                self.close_overlay();
-                self.open_generator(false);
-            }
-            Action::OpenPasswordHistory => self.open_password_history(),
-            Action::OpenHealthReport => self.open_health_report(),
-            Action::OpenCommandPalette => {}
-            Action::CloneItem => self.queue(PendingAction::CloneItem),
-            Action::SignOutProfile => self.sign_out_current_profile(),
-            Action::ReceiveSend => {
-                self.close_overlay();
-                self.open_receive_send();
-            }
-            _ => self.set_status(format!("Use keyboard shortcut for `{}`", action.label())),
-        }
-        self.touch();
     }
 
     pub fn open_password_history(&mut self) {
