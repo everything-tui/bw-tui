@@ -13,7 +13,7 @@ use ratatui::Frame;
 use crate::action::Action;
 use crate::app::{App, FocusPane};
 use crate::models::{FilterKind, ItemType};
-use crate::ui::chrome::{self, avatar, chip, fill, hints, keycap, raised};
+use crate::ui::chrome::{self, chip, fill, hints, keycap};
 use crate::ui::layout::{vault_layout, HitMap};
 use crate::ui::theme::{pal, theme};
 
@@ -59,37 +59,6 @@ fn draw_separators(frame: &mut Frame, layout: &crate::ui::layout::VaultLayout) {
     }
 }
 
-/// Pane title row: `LOGINS` in muted caps, accent with a bar when focused.
-fn pane_title(
-    title: &str,
-    focused: bool,
-    right: Option<String>,
-    width: u16,
-    bg: Color,
-) -> Line<'static> {
-    let t = theme();
-    let (bar, style) = if focused {
-        (
-            Span::styled(if t.ascii { "|" } else { "▍" }, Style::new().fg(t.accent)),
-            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
-        )
-    } else {
-        (
-            Span::raw(" "),
-            Style::new().fg(t.muted).add_modifier(Modifier::BOLD),
-        )
-    };
-    let title = title.to_uppercase();
-    let mut spans = vec![bar, Span::styled(title.clone(), style)];
-    if let Some(r) = right {
-        let used = 1 + title.chars().count();
-        let gap = (width as usize).saturating_sub(used + r.chars().count() + 1);
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(Span::styled(r, Style::new().fg(t.muted)));
-    }
-    Line::from(spans).style(Style::new().bg(bg))
-}
-
 // ---------------------------------------------------------------------------
 // Header
 // ---------------------------------------------------------------------------
@@ -99,12 +68,8 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     fill(frame, area, t.mantle);
 
     let glyph = if t.ascii { "#" } else { "◆" };
-    let filter_label = app
-        .sidebar
-        .get(app.selected_sidebar)
-        .map(|e| sidebar_label(&e.label).to_string())
-        .unwrap_or_else(|| "All items".into());
-    let sep = if t.ascii { ">" } else { "›" };
+    let sep = "·";
+    let server = app.server_url.trim().trim_end_matches('/');
     let mut left = vec![
         Span::styled(
             format!(" {glyph} "),
@@ -112,16 +77,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled(
             "bitwarden-tui",
-            Style::new().fg(t.text).add_modifier(Modifier::BOLD),
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("   Vault {sep} "), Style::new().fg(t.muted)),
-        Span::styled(filter_label, Style::new().fg(t.subtext)),
+        Span::styled(
+            format!("   profile {}", app.active_profile_name()),
+            Style::new().fg(t.subtext),
+        ),
     ];
-    if !app.search_query.is_empty() {
-        left.push(Span::styled(format!(" {sep} "), Style::new().fg(t.muted)));
+    if !server.is_empty() {
         left.push(Span::styled(
-            format!("“{}”", app.search_query),
-            Style::new().fg(t.accent),
+            format!(" {sep} {server}"),
+            Style::new().fg(t.subtext),
         ));
     }
 
@@ -163,6 +129,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.subtext),
         ));
     }
+    if app.using_mock {
+        right.push(chip("MOCK", t.accent_fg, t.warning));
+        right.push(Span::raw("  "));
+    }
+    right.push(theme_pill(t));
+    right.push(Span::raw("  "));
     let lock = if app.effective_auto_lock_minutes().is_none() {
         None
     } else {
@@ -172,7 +144,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         let color = if secs < 60 { t.warning } else { t.subtext };
         right.push(Span::styled(
             format!(
-                "{} {:02}:{:02}  ",
+                "{} {:02}:{:02}",
                 if t.ascii { "lock" } else { "◷" },
                 secs / 60,
                 secs % 60
@@ -180,26 +152,24 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(color),
         ));
     }
-    right.push(Span::styled(
-        format!(
-            "{} {} ",
-            if t.ascii { "@" } else { "◉" },
-            app.active_profile_name()
-        ),
-        Style::new().fg(t.subtext),
-    ));
-    if app.using_mock {
-        right.push(Span::raw(" "));
-        right.push(chip("MOCK", t.accent_fg, t.warning));
-        right.push(Span::raw(" "));
-    }
-
+    right.push(Span::raw(" "));
     let width = |spans: &[Span]| -> usize { spans.iter().map(|s| s.width()).sum() };
     let gap = (area.width as usize).saturating_sub(width(&left) + width(&right));
     let mut spans = left;
     spans.push(Span::raw(" ".repeat(gap)));
     spans.extend(right);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Rounded-looking pill with the active theme name.
+fn theme_pill(t: &crate::ui::theme::Theme) -> Span<'static> {
+    if t.no_color {
+        return Span::styled(format!("[{}]", t.name), Style::new());
+    }
+    Span::styled(
+        format!(" {} ", t.name),
+        Style::new().fg(t.accent).bg(t.select_bg),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -337,55 +307,57 @@ fn draw_folders(frame: &mut Frame, area: Rect, app: &App, hit: &mut HitMap) {
     }
 }
 
-/// Width reserved at the end of each item row for ★ / org badges.
-const BADGE_COL: usize = 5;
-
 // ---------------------------------------------------------------------------
 // Item list
 // ---------------------------------------------------------------------------
 
-fn draw_search_bar(frame: &mut Frame, area: Rect, app: &App, count_label: String) {
+/// First row of the list: `Items ······ 8 · sort: name`, or the live search
+/// line (`/ type:login folder:work ······ 3 results`) while a query is active.
+fn draw_list_header(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    title: &str,
+    focused: bool,
+    right: String,
+    count: usize,
+) {
     let t = theme();
-    let bg = raised(t.base);
-    let active = app.searching;
-    let icon = if t.ascii { "/" } else { "⌕" };
-    let mut spans = vec![Span::styled(
-        format!(" {icon} "),
-        Style::new().fg(if active { t.accent } else { t.muted }),
-    )];
-    if app.search_query.is_empty() && !active {
-        spans.push(Span::styled("Search", Style::new().fg(t.muted)));
-        let key = app.keymap.label(Action::SearchStart);
-        spans.push(Span::styled(format!("  {key}"), Style::new().fg(t.border)));
-    } else {
+    let searching = app.searching || !app.search_query.is_empty();
+    let mut spans: Vec<Span> = Vec::new();
+    let right = if searching {
+        spans.push(Span::styled(
+            " / ",
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::styled(
             app.search_query.clone(),
             Style::new().fg(t.text),
         ));
-        if active {
+        if app.searching {
             spans.push(Span::styled(
                 if t.ascii { "_" } else { "▏" },
                 Style::new().fg(t.accent),
             ));
         }
-    }
-    let used: usize = spans.iter().map(|s| s.width()).sum();
-    let gap = (area.width as usize).saturating_sub(used + count_label.chars().count() + 1);
-    spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(Span::styled(
-        format!("{count_label} "),
-        Style::new().fg(t.muted),
-    ));
-    let style = if t.no_color {
-        Style::new().add_modifier(if active {
-            Modifier::UNDERLINED
-        } else {
-            Modifier::empty()
-        })
+        format!("{count} {}", if count == 1 { "result" } else { "results" })
     } else {
-        Style::new().bg(bg)
+        let style = if focused {
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(t.text).add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(format!(" {title}"), style));
+        right
     };
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(style), area);
+    let used: usize = spans.iter().map(|s| s.width()).sum();
+    let gap = (area.width as usize).saturating_sub(used + right.chars().count() + 1);
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(format!("{right} "), Style::new().fg(t.subtext)));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(t.base)),
+        area,
+    );
 }
 
 fn draw_items(frame: &mut Frame, area: Rect, app: &App, hit: &mut HitMap) {
@@ -418,27 +390,24 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App, hit: &mut HitMap) {
     } else {
         format!("{} marked · ", app.selected_ids.len())
     };
-    draw_search_bar(
+    let right = format!(
+        "{marked}{count} {noun} · sort: {}",
+        app.power.sort.label().to_lowercase()
+    );
+    draw_list_header(
         frame,
         Rect::new(inner.x, inner.y, inner.width, 1),
         app,
-        format!("{marked}{count} {noun}"),
-    );
-    frame.render_widget(
-        Paragraph::new(pane_title(
-            if sends { "Sends" } else { "Items" },
-            focused,
-            None,
-            inner.width,
-            t.base,
-        )),
-        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+        if sends { "Sends" } else { "Items" },
+        focused,
+        right,
+        count,
     );
     let list = Rect::new(
         inner.x,
-        inner.y + 3,
+        inner.y + 2,
         inner.width,
-        inner.height.saturating_sub(3),
+        inner.height.saturating_sub(2),
     );
 
     if count == 0 {
@@ -471,7 +440,7 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App, hit: &mut HitMap) {
     let viewport = list.height as usize;
     let offset = (selected + 1).saturating_sub(viewport);
     let width = list.width.saturating_sub(1) as usize; // leave a column for the scrollbar
-    let wide = width >= 46;
+    let wide = width >= 30;
 
     for (row_i, idx) in (offset..count).take(viewport).enumerate() {
         let y = list.y + row_i as u16;
@@ -493,22 +462,22 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App, hit: &mut HitMap) {
             Style::new().fg(t.text)
         };
 
-        let (av, name, sub, badges): (Span, String, String, Vec<Span>) = if sends {
+        let (lead, name, sub, badges): (Span, String, String, Vec<Span>) = if sends {
             let s = &app.sends[app.visible_sends[idx]];
             let color = if s.is_file { t.info } else { t.accent };
             let mut badges = Vec::new();
             if s.has_password {
                 badges.push(Span::styled(
-                    if t.ascii { "pw " } else { "⚿ " },
+                    if t.ascii { " pw" } else { " ⚿" },
                     Style::new().fg(t.subtext),
                 ));
             }
             if s.disabled {
-                badges.push(Span::styled("off ", Style::new().fg(t.muted)));
+                badges.push(Span::styled(" off", Style::new().fg(t.muted)));
             }
-            let sub = if s.is_file { "file" } else { "text" };
+            let sub = if s.is_file { "File" } else { "Text" };
             (
-                avatar(&s.name, color),
+                Span::styled(type_glyph(None), Style::new().fg(color)),
                 s.name.clone(),
                 sub.to_string(),
                 badges,
@@ -518,49 +487,57 @@ fn draw_items(frame: &mut Frame, area: Rect, app: &App, hit: &mut HitMap) {
             let mut badges = Vec::new();
             if item.organization_id.is_some() {
                 badges.push(Span::styled(
-                    if t.ascii { "org " } else { "◎ " },
+                    if t.ascii { " org" } else { " ◎" },
                     Style::new().fg(t.accent),
                 ));
             }
             if item.favorite {
                 badges.push(Span::styled(
-                    format!("{} ", t.star()),
+                    format!(" {}", t.star()),
                     Style::new().fg(t.favorite),
                 ));
             }
-            let av = if app.selected_ids.contains(&item.id) {
-                chip(if t.ascii { "x" } else { "✓" }, t.accent_fg, t.accent)
+            let lead = if app.selected_ids.contains(&item.id) {
+                Span::styled(
+                    if t.ascii { "x" } else { "✓" },
+                    Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+                )
             } else {
-                avatar(&item.name, type_color(item.item_type))
+                Span::styled(
+                    type_glyph(Some(item.item_type)),
+                    Style::new().fg(type_color(item.item_type)),
+                )
             };
-            (av, item.name.clone(), item.subtitle(), badges)
+            let sub = app
+                .folder_name_for_item(item.folder_id.as_deref())
+                .unwrap_or_default();
+            (lead, item.name.clone(), sub, badges)
         };
 
         let badge_w: usize = badges.iter().map(|b| b.width()).sum();
-        // bar(1) + space + avatar(3) + space(2) … fixed badge column (so the
-        // subtitle column lines up whether or not a row has badges).
-        let fixed = 1 + 1 + 3 + 2 + BADGE_COL.max(badge_w) + 1;
-        let room = width.saturating_sub(fixed);
-        let (name_w, sub_w) = if wide {
-            let name_w = (room * 55 / 100).max(8);
-            (name_w, room.saturating_sub(name_w + 2))
+        // bar(1) + space + dot(1) + 2 spaces, name, badges, gap, folder + 1 margin.
+        let lead_w = 1 + 1 + 1 + 2;
+        let sub_w = if wide {
+            sub.chars().count().min(width / 3)
         } else {
-            (room, 0)
+            0
         };
+        let name_w = width
+            .saturating_sub(lead_w + badge_w + 1 + if sub_w > 0 { sub_w + 2 } else { 0 })
+            .max(4);
         let name_txt = truncate(&name, name_w);
-        let mut spans = vec![bar, Span::raw(" "), av, Span::raw("  ")];
-        spans.push(Span::styled(name_txt.clone(), name_style));
-        let mut used = 1 + 1 + 3 + 2 + name_txt.chars().count();
-        if wide {
-            let pad = name_w.saturating_sub(name_txt.chars().count()) + 2;
-            let sub_txt = truncate(&sub, sub_w);
-            spans.push(Span::raw(" ".repeat(pad)));
-            used += pad + sub_txt.chars().count();
-            spans.push(Span::styled(sub_txt, Style::new().fg(t.muted)));
-        }
-        let gap = width.saturating_sub(used + badge_w);
-        spans.push(Span::raw(" ".repeat(gap)));
+        let mut used = lead_w + name_txt.chars().count() + badge_w;
+        let mut spans = vec![bar, Span::raw(" "), lead, Span::raw("  ")];
+        spans.push(Span::styled(name_txt, name_style));
         spans.extend(badges);
+        if sub_w > 0 {
+            let sub_txt = truncate(&sub, sub_w);
+            let gap = width.saturating_sub(used + sub_txt.chars().count() + 1);
+            spans.push(Span::raw(" ".repeat(gap)));
+            used += gap + sub_txt.chars().count();
+            spans.push(Span::styled(sub_txt, Style::new().fg(t.subtext)));
+        }
+        let _ = used;
         frame.render_widget(
             Paragraph::new(Line::from(spans).style(row_style)),
             Rect::new(list.x, y, width as u16, 1),
@@ -702,18 +679,17 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         key(Action::CopyUri),
     );
 
-    let mut meta = vec![Span::styled(
-        item.item_type.label().to_string(),
-        Style::new().fg(type_color(item.item_type)),
-    )];
-    let dot = || Span::styled("  ·  ", Style::new().fg(t.muted));
-    if item.favorite {
-        meta.push(dot());
-        meta.push(Span::styled(
-            format!("{} Favorite", t.star()),
-            Style::new().fg(t.favorite),
-        ));
-    }
+    let dot = || Span::styled(" · ", Style::new().fg(t.muted));
+    let mut meta = vec![
+        Span::styled(
+            format!("{} ", type_glyph(Some(item.item_type))),
+            Style::new().fg(type_color(item.item_type)),
+        ),
+        Span::styled(
+            item.item_type.label().to_string(),
+            Style::new().fg(t.subtext),
+        ),
+    ];
     if let Some(folder) = app.folder_name_for_item(item.folder_id.as_deref()) {
         meta.push(dot());
         meta.push(Span::styled(folder, Style::new().fg(t.subtext)));
@@ -726,19 +702,17 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         meta.push(dot());
         meta.push(Span::styled(org.clone(), Style::new().fg(t.accent)));
     }
-    let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            avatar(&item.name, type_color(item.item_type)),
-            Span::raw("  "),
-            Span::styled(
-                truncate(&item.name, (width as usize).saturating_sub(5)),
-                Style::new().fg(t.text).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(meta),
-        Line::from(""),
-    ];
+    let mut title = vec![Span::styled(
+        truncate(&item.name, (width as usize).saturating_sub(3)),
+        Style::new().fg(t.text).add_modifier(Modifier::BOLD),
+    )];
+    if item.favorite {
+        title.push(Span::styled(
+            format!(" {}", t.star()),
+            Style::new().fg(t.favorite),
+        ));
+    }
+    let mut lines: Vec<Line> = vec![Line::from(title), Line::from(meta), Line::from("")];
     if item.reprompt {
         let lock = if t.ascii { "!" } else { "⚿" };
         lines.push(Line::from(Span::styled(
@@ -767,6 +741,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
                 let pw = item.password.as_deref().map(|_| "••••••••••");
                 kv(&mut lines, width, "Password", pw, &k_pass);
             }
+            let has_totp_code = totp_now.is_some();
             let totp_label = if let Some(display) = totp_now {
                 let secs = display.remaining;
                 let code = if app.reveal_secrets {
@@ -778,7 +753,15 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 item.totp.as_ref().map(|_| "configured".to_string())
             };
-            kv(&mut lines, width, "TOTP", totp_label.as_deref(), &k_totp);
+            kv(&mut lines, width, "One-time code", totp_label.as_deref(), &k_totp);
+            if app.reveal_secrets && has_totp_code {
+                // Tint the freshly pushed value line like a live code.
+                if let Some(l) = lines.len().checked_sub(2).and_then(|i| lines.get_mut(i)) {
+                    for sp in l.spans.iter_mut() {
+                        sp.style = sp.style.fg(t.info);
+                    }
+                }
+            }
             if item.uris.is_empty() {
                 kv(&mut lines, width, "Website", None, &k_uri);
             }
@@ -1033,7 +1016,15 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         if lines.last().is_some_and(|l| l.width() > 0) {
             lines.push(Line::from(""));
         }
-        field_label(&mut lines, width, "Notes", &key(Action::CopyNotes));
+        field_label(&mut lines, "Notes");
+        let notes_cap = key_chip(&key(Action::CopyNotes));
+        if notes_cap.width() > 0 {
+            if let Some(last) = lines.last_mut() {
+                let gap = (width as usize).saturating_sub(last.width() + notes_cap.width());
+                last.spans.push(Span::raw(" ".repeat(gap)));
+                last.spans.push(notes_cap);
+            }
+        }
         for line in notes.lines() {
             lines.push(Line::from(Span::styled(
                 line.to_string(),
@@ -1097,20 +1088,41 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(hints(&pairs, t.surface))), footer);
 }
 
-/// Stacked field: `LABEL ······ [key]` then the value, then a spacer.
-/// An empty label continues the previous field (extra URIs).
+/// Stacked field: small caps label, then the value with its copy-key chip
+/// right-aligned on the same row, then a spacer. An empty label continues the
+/// previous field (extra URIs).
 fn kv(lines: &mut Vec<Line>, width: u16, label: &str, value: Option<&str>, key: &str) {
     let t = theme();
+    let cap = key_chip(key);
+    let room = (width as usize).saturating_sub(cap.width() + 1);
     let (value, value_style) = match value {
-        Some(v) if !v.is_empty() => (truncate(v, width as usize), Style::new().fg(t.text)),
+        Some(v) if !v.is_empty() => (truncate(v, room), Style::new().fg(t.text)),
         _ => ("—".to_string(), Style::new().fg(t.muted)),
     };
-    field_label(lines, width, label, key);
-    lines.push(Line::from(Span::styled(value, value_style)));
+    field_label(lines, label);
+    lines.push(value_row(vec![Span::styled(value, value_style)], width, cap));
     lines.push(Line::from(""));
 }
 
-fn field_label(lines: &mut Vec<Line>, width: u16, label: &str, key: &str) {
+fn key_chip(key: &str) -> Span<'static> {
+    if key.is_empty() {
+        Span::raw("")
+    } else {
+        keycap(key, theme().surface)
+    }
+}
+
+fn value_row(mut spans: Vec<Span<'static>>, width: u16, cap: Span<'static>) -> Line<'static> {
+    if cap.width() > 0 {
+        let used: usize = spans.iter().map(|s| s.width()).sum();
+        let gap = (width as usize).saturating_sub(used + cap.width());
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(cap);
+    }
+    Line::from(spans)
+}
+
+fn field_label(lines: &mut Vec<Line>, label: &str) {
     let t = theme();
     if label.is_empty() {
         if lines.last().is_some_and(|l| l.width() == 0) {
@@ -1118,25 +1130,18 @@ fn field_label(lines: &mut Vec<Line>, width: u16, label: &str, key: &str) {
         }
         return;
     }
-    let label = label.to_uppercase();
-    let mut spans = vec![Span::styled(
-        label.clone(),
+    lines.push(Line::from(Span::styled(
+        label.to_uppercase(),
         Style::new().fg(t.muted).add_modifier(Modifier::BOLD),
-    )];
-    if !key.is_empty() {
-        let cap = keycap(key, t.surface);
-        let gap = (width as usize).saturating_sub(label.chars().count() + cap.width());
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(cap);
-    }
-    lines.push(Line::from(spans));
+    )));
 }
 
 /// Password field with digit/symbol coloring when revealed.
 fn kv_password(lines: &mut Vec<Line>, width: u16, label: &str, password: &str, key: &str) {
-    let shown = truncate(password, width as usize);
-    field_label(lines, width, label, key);
-    lines.push(Line::from(theme().password_spans(&shown)));
+    let cap = key_chip(key);
+    let shown = truncate(password, (width as usize).saturating_sub(cap.width() + 1));
+    field_label(lines, label);
+    lines.push(value_row(theme().password_spans(&shown), width, cap));
     lines.push(Line::from(""));
 }
 
@@ -1174,51 +1179,41 @@ fn pie(remaining: u64) -> &'static str {
 fn draw_vault_status(frame: &mut Frame, area: Rect, app: &App) {
     let t = theme();
     fill(frame, area, t.mantle);
-    let mode = if app.searching {
-        "SEARCH"
-    } else if app.focus == FocusPane::Folders {
-        "FOLDERS"
-    } else if matches!(app.current_filter(), FilterKind::Sends) {
-        "SENDS"
-    } else if app.in_trash() {
-        "TRASH"
-    } else if app.focus == FocusPane::Detail {
-        "DETAIL"
-    } else {
-        "VAULT"
-    };
-    let mode_bg = if app.in_trash() { t.danger } else { t.accent };
-    let left = vec![
-        chip(mode, t.accent_fg, mode_bg),
-        Span::styled(format!(" {}", app.status), Style::new().fg(t.subtext)),
-    ];
-
     let width_of = |spans: &[Span]| -> usize { spans.iter().map(|s| s.width()).sum() };
-    let mut budget = (area.width as usize).saturating_sub(width_of(&left) + 1);
-
     let km = &app.keymap;
-    let to_pair = |(action, label): (Action, String)| (km.label(action), label);
-    let help = hints(&[to_pair((Action::ToggleHelp, "help".into()))], t.mantle);
-    budget = budget.saturating_sub(width_of(&help));
-    let mut right: Vec<Span> = Vec::new();
-    for pair in context_hints(app).into_iter().map(to_pair) {
-        let h = hints(&[pair], t.mantle);
-        let w = width_of(&h);
-        if w > budget {
+
+    // Hints on the left: accent key, quiet label. Always end with help.
+    let mut pairs: Vec<(String, String)> = context_hints(app)
+        .into_iter()
+        .map(|(a, l)| (km.label(a), l))
+        .filter(|(k, _)| !k.is_empty())
+        .collect();
+    pairs.push((km.label(Action::ToggleHelp), "help".into()));
+
+    let budget = (area.width as usize).saturating_sub(2);
+    let mut left: Vec<Span> = vec![Span::raw(" ")];
+    let help = pairs.pop();
+    for pair in pairs.into_iter().chain(help) {
+        let h = footer_hint(&pair.0, &pair.1);
+        if width_of(&left) + width_of(&h) > budget {
             break;
         }
-        budget -= w;
-        right.extend(h);
+        left.extend(h);
     }
-    right.extend(help);
 
-    let used = width_of(&left) + width_of(&right);
-    let mut spans = left;
-    spans.push(Span::raw(
-        " ".repeat((area.width as usize).saturating_sub(used)),
-    ));
-    spans.extend(right);
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(Line::from(left)), area);
+}
+
+/// `c copy password` — accent key, muted label, two spaces after.
+fn footer_hint(key: &str, label: &str) -> Vec<Span<'static>> {
+    let t = theme();
+    vec![
+        Span::styled(
+            key.to_string(),
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {label}   "), Style::new().fg(t.subtext)),
+    ]
 }
 
 /// Key hints for the status bar, based on what has focus and what's selected.
@@ -1274,19 +1269,17 @@ fn context_hints(app: &App) -> Vec<(crate::action::Action, String)> {
             h(Back, "back"),
         ];
     }
-    let mut hints = vec![h(CopyPassword, "pass"), h(CopyUsername, "user")];
-    if app
-        .selected_decrypted()
-        .is_some_and(|i| i.totp.as_deref().is_some_and(|t| !t.is_empty()))
-    {
-        hints.push(h(CopyTotp, "totp"));
-    }
+    let mut hints = vec![
+        h(MoveDown, "move"),
+        h(CopyPassword, "copy password"),
+        h(CopySequence, "copy sequence"),
+    ];
     if app.pending_undo.is_some() {
         hints.insert(0, h(UndoDelete, "undo"));
     }
     hints.extend([
         h(SearchStart, "search"),
-        h(GotoPrefix, "go to"),
+        h(ChangeTheme, "theme"),
         h(OpenCommandPalette, "commands"),
     ]);
     hints
@@ -1309,6 +1302,18 @@ fn filter_glyph(kind: &FilterKind) -> (&'static str, Color) {
         FilterKind::Organization(_) => ("◎", pal::accent()),
         FilterKind::Collection(_) => ("▣", pal::muted()),
         FilterKind::Sends => ("➤", pal::accent()),
+    }
+}
+
+/// Single-width marker per item type (`None` = Send).
+fn type_glyph(t: Option<ItemType>) -> &'static str {
+    if theme().ascii {
+        return "o";
+    }
+    match t {
+        Some(ItemType::Card) => "▬",
+        Some(ItemType::Identity) => "◉",
+        _ => "●",
     }
 }
 

@@ -322,7 +322,7 @@ fn draw_ssh_confirm(frame: &mut Frame, p: &PowerOverlay) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-/// Toast stack in the top-right corner (newest on top).
+/// Toast stack in the bottom-right corner, above the footer (newest at the bottom).
 pub fn draw_toasts(frame: &mut Frame, app: &App) {
     let t = theme();
     let area = frame.area();
@@ -330,9 +330,9 @@ pub fn draw_toasts(frame: &mut Frame, app: &App) {
         return;
     }
     let max_w = area.width.saturating_sub(2).min(52);
-    let mut y = area.y + 2;
+    let mut y = (area.y + area.height).saturating_sub(4);
     for toast in app.power.toasts.iter_newest_first() {
-        if y + 1 > area.y + area.height {
+        if y < area.y + 1 {
             break;
         }
         let color = match toast.kind {
@@ -375,6 +375,6 @@ pub fn draw_toasts(frame: &mut Frame, app: &App) {
             .style(Style::default().bg(bg)),
             rect,
         );
-        y += 2;
+        y = y.saturating_sub(2);
     }
 }
