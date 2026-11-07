@@ -389,6 +389,20 @@ pub enum Overlay {
     },
     NewItemType {
         selected: usize,
+        /// Where the new item will be saved (personal folder or org collection).
+        dests: Vec<NewItemDestChoice>,
+        dest: usize,
+    },
+    /// Fuzzy search over New item destinations (`/` from the picker).
+    NewItemDestSearch {
+        /// Item type row selected in the picker (restored on return).
+        item_type: usize,
+        dests: Vec<NewItemDestChoice>,
+        /// Destination before the search opened (restored on Esc).
+        prev_dest: usize,
+        query: String,
+        /// Index into the filtered list.
+        selected: usize,
     },
     Generator {
         mode: GeneratorMode,
@@ -542,6 +556,24 @@ pub enum Overlay {
         field: ChangePasswordField,
         error: Option<String>,
     },
+}
+
+/// Destination for a newly created item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewItemDest {
+    /// Personal vault, optionally inside a folder.
+    Personal { folder_id: Option<String> },
+    /// Organization-owned, in one collection.
+    Collection {
+        organization_id: String,
+        collection_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewItemDestChoice {
+    pub label: String,
+    pub dest: NewItemDest,
 }
 
 /// Slow auth work queued by a key press so the loop can paint a busy frame before running it.
@@ -870,6 +902,8 @@ pub struct App {
     pub pending: Option<PendingAction>,
     /// Backup of ItemForm when opening the generator from it.
     pub item_form_backup: Option<Overlay>,
+    /// Destination picked in the New item picker; consumed by the create forms.
+    pub new_item_dest: NewItemDest,
     /// Power-user feature state (toasts, sort, copy sequence, auto-type, QR, …).
     pub power: crate::app::PowerState,
     /// Loaded from `config.toml` (theme, generator defaults, keybindings).
@@ -1052,6 +1086,7 @@ impl App {
             busy: false,
             pending: None,
             item_form_backup: None,
+            new_item_dest: NewItemDest::Personal { folder_id: None },
             power: crate::app::PowerState::new(&config),
             config,
             keymap,
@@ -3063,6 +3098,10 @@ impl App {
         let Some(session) = self.session.as_ref() else {
             return true;
         };
+        // Org destinations are validated at save time (restricted types, collection access).
+        if matches!(self.new_item_dest, NewItemDest::Collection { .. }) {
+            return true;
+        }
         match session.check_item_creation_allowed(ty) {
             Ok(()) => true,
             Err(e) => {
@@ -3073,16 +3112,116 @@ impl App {
     }
 
     pub fn open_new_item_picker(&mut self) {
-        if let Some(session) = self.session.as_ref() {
-            if session.personal_vault_blocked_by_policy() {
-                self.set_status(
-                    "Organization policy: personal vault is disabled — cannot create items",
-                );
-                return;
+        let dests = self.new_item_destinations();
+        if dests.is_empty() {
+            self.set_status(
+                "Organization policy: personal vault is disabled — cannot create items",
+            );
+            return;
+        }
+        let dest = self.default_new_item_dest(&dests);
+        self.overlay = Overlay::NewItemType {
+            selected: 0,
+            dests,
+            dest,
+        };
+        self.touch();
+    }
+
+    /// Personal vault + folders (unless policy blocks it), then every writable org collection.
+    pub fn new_item_destinations(&self) -> Vec<NewItemDestChoice> {
+        let mut out = Vec::new();
+        let personal_blocked = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.personal_vault_blocked_by_policy());
+        if !personal_blocked {
+            out.push(NewItemDestChoice {
+                label: "My vault (no folder)".into(),
+                dest: NewItemDest::Personal { folder_id: None },
+            });
+            for f in &self.folders {
+                if let Some(id) = &f.id {
+                    out.push(NewItemDestChoice {
+                        label: format!("My vault / {}", f.name),
+                        dest: NewItemDest::Personal {
+                            folder_id: Some(id.clone()),
+                        },
+                    });
+                }
             }
         }
-        self.overlay = Overlay::NewItemType { selected: 0 };
-        self.touch();
+        let groups = if self.using_mock {
+            crate::mock::sample_share_targets()
+        } else {
+            self.session
+                .as_ref()
+                .map(|s| s.share_targets())
+                .unwrap_or_default()
+        };
+        for g in groups {
+            for c in g.collections {
+                out.push(NewItemDestChoice {
+                    label: format!("{} / {}", g.organization_name, c.name),
+                    dest: NewItemDest::Collection {
+                        organization_id: g.organization_id.clone(),
+                        collection_id: c.id,
+                    },
+                });
+            }
+        }
+        out
+    }
+
+    /// Indices into `dests` matching `query`, best fuzzy match first (all, in order, if empty).
+    pub fn filter_new_item_dests(dests: &[NewItemDestChoice], query: &str) -> Vec<usize> {
+        let query = query.trim();
+        if query.is_empty() {
+            return (0..dests.len()).collect();
+        }
+        let matcher = SkimMatcherV2::default();
+        let mut scored: Vec<(i64, usize)> = dests
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| matcher.fuzzy_match(&d.label, query).map(|sc| (sc, i)))
+            .collect();
+        scored.sort_by_key(|&(sc, i)| (std::cmp::Reverse(sc), i));
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// Preselect the destination matching the sidebar filter (folder / org / collection).
+    fn default_new_item_dest(&self, dests: &[NewItemDestChoice]) -> usize {
+        let pos = |f: &dyn Fn(&NewItemDest) -> bool| dests.iter().position(|d| f(&d.dest));
+        match self.current_filter() {
+            FilterKind::Folder(id) => pos(&|d| {
+                matches!(d, NewItemDest::Personal { folder_id: Some(f) } if *f == id)
+            }),
+            FilterKind::Collection(id) => {
+                pos(&|d| matches!(d, NewItemDest::Collection { collection_id, .. } if *collection_id == id))
+            }
+            FilterKind::Organization(id) => pos(&|d| {
+                matches!(d, NewItemDest::Collection { organization_id, .. } if *organization_id == id)
+            }),
+            _ => None,
+        }
+        .unwrap_or(0)
+    }
+
+    /// Folder id + org placement for the pending create, from `new_item_dest`.
+    fn new_item_placement(&self) -> (Option<String>, Option<vault_session::OrgPlacement>) {
+        match &self.new_item_dest {
+            NewItemDest::Personal { folder_id } => (folder_id.clone(), None),
+            NewItemDest::Collection {
+                organization_id,
+                collection_id,
+            } => (
+                None,
+                Some(vault_session::OrgPlacement::new(
+                    organization_id.clone(),
+                    vec![collection_id.clone()],
+                )),
+            ),
+        }
     }
 
     pub fn open_new_login(&mut self) {
@@ -3920,6 +4059,7 @@ impl App {
             })
             .collect();
 
+        let (new_folder_id, new_placement) = self.new_item_placement();
         let draft = LoginDraft {
             name: name.trim().to_string(),
             username: nonempty(username),
@@ -3927,7 +4067,11 @@ impl App {
             totp: nonempty(totp),
             uris: draft_uris.clone(),
             notes: nonempty(notes),
-            folder_id: None,
+            folder_id: if editing_id.is_some() {
+                None
+            } else {
+                new_folder_id
+            },
             favorite: false,
             reprompt: *reprompt,
         };
@@ -3992,7 +4136,7 @@ impl App {
                 .map(|_| "Login updated".to_string())
         } else {
             session
-                .create_login(&draft)
+                .create_login_in(&draft, new_placement.as_ref())
                 .await
                 .map(|_| "Login created".to_string())
         };
@@ -4289,10 +4433,15 @@ impl App {
             self.set_status("Name is required");
             return;
         }
+        let (new_folder_id, new_placement) = self.new_item_placement();
         let draft = NoteDraft {
             name: name.trim().to_string(),
             notes: nonempty(notes),
-            folder_id: None,
+            folder_id: if editing_id.is_some() {
+                None
+            } else {
+                new_folder_id
+            },
             favorite: false,
         };
         let editing_id = editing_id.clone();
@@ -4340,7 +4489,7 @@ impl App {
                 .map(|_| "Note updated".to_string())
         } else {
             session
-                .create_note(&draft)
+                .create_note_in(&draft, new_placement.as_ref())
                 .await
                 .map(|_| "Note created".to_string())
         };
@@ -5583,6 +5732,7 @@ impl App {
             self.set_status("Card name is required");
             return;
         }
+        let (new_folder_id, new_placement) = self.new_item_placement();
         let draft = CardDraft {
             name: name.trim().to_string(),
             cardholder_name: nonempty(cardholder_name),
@@ -5592,7 +5742,11 @@ impl App {
             exp_year: nonempty(exp_year),
             code: nonempty(code),
             notes: nonempty(notes),
-            folder_id: None,
+            folder_id: if editing_id.is_some() {
+                None
+            } else {
+                new_folder_id
+            },
             favorite: false,
             reprompt: *reprompt,
         };
@@ -5616,7 +5770,7 @@ impl App {
                 .map(|_| "Card updated".to_string())
         } else {
             session
-                .create_card(&draft)
+                .create_card_in(&draft, new_placement.as_ref())
                 .await
                 .map(|_| "Card created".to_string())
         };
@@ -5664,6 +5818,7 @@ impl App {
             self.set_status("Identity name is required");
             return;
         }
+        let (new_folder_id, new_placement) = self.new_item_placement();
         let draft = IdentityDraft {
             name: name.trim().to_string(),
             title: nonempty(title),
@@ -5685,7 +5840,11 @@ impl App {
             passport_number: nonempty(passport),
             license_number: nonempty(license),
             notes: nonempty(notes),
-            folder_id: None,
+            folder_id: if editing_id.is_some() {
+                None
+            } else {
+                new_folder_id
+            },
             favorite: false,
             reprompt: *reprompt,
         };
@@ -5709,7 +5868,7 @@ impl App {
                 .map(|_| "Identity updated".to_string())
         } else {
             session
-                .create_identity(&draft)
+                .create_identity_in(&draft, new_placement.as_ref())
                 .await
                 .map(|_| "Identity created".to_string())
         };
@@ -5741,13 +5900,18 @@ impl App {
             self.set_status("SSH key name is required");
             return;
         }
+        let (new_folder_id, new_placement) = self.new_item_placement();
         let draft = SshKeyDraft {
             name: name.trim().to_string(),
             private_key: nonempty(private_key),
             public_key: nonempty(public_key),
             fingerprint: nonempty(fingerprint),
             notes: nonempty(notes),
-            folder_id: None,
+            folder_id: if editing_id.is_some() {
+                None
+            } else {
+                new_folder_id
+            },
             favorite: false,
         };
         let editing_id = editing_id.clone();
@@ -5770,7 +5934,7 @@ impl App {
                 .map(|_| "SSH key updated".to_string())
         } else {
             session
-                .create_ssh_key(&draft)
+                .create_ssh_key_in(&draft, new_placement.as_ref())
                 .await
                 .map(|_| "SSH key created".to_string())
         };

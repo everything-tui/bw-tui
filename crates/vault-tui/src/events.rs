@@ -5,9 +5,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crate::action::{Action, GOTO_TARGETS};
 use crate::app::{
     writable_share_collections, App, CardField, ChangePasswordField, ClipboardKind, EditField,
-    FocusPane, FormUriLine, IdentityField, LoginAuthMode, LoginField, NoteField, Overlay,
-    PendingAction, PinSetupField, ProfileEditField, ProfileManagerMode, Screen, ShareToOrgStep,
-    SshKeyField,
+    FocusPane, FormUriLine, IdentityField, LoginAuthMode, LoginField, NewItemDest, NoteField,
+    Overlay, PendingAction, PinSetupField, ProfileEditField, ProfileManagerMode, Screen,
+    ShareToOrgStep, SshKeyField,
 };
 use crate::keybinds::KeyContext;
 use crate::profiles::format_auto_lock_input;
@@ -594,6 +594,7 @@ async fn handle_overlay(app: &mut App, key: KeyEvent) -> bool {
         Overlay::ItemForm { .. } => handle_item_form(app, key).await,
         Overlay::NoteForm { .. } => handle_note_form(app, key).await,
         Overlay::NewItemType { .. } => handle_new_item_type(app, key),
+        Overlay::NewItemDestSearch { .. } => handle_new_item_dest_search(app, key),
         Overlay::Generator { .. } => handle_generator(app, key),
         Overlay::FolderForm { .. } => handle_folder_form(app, key).await,
         Overlay::ConfirmDelete { .. } => handle_confirm_delete(app, key).await,
@@ -860,21 +861,56 @@ fn handle_new_item_type(app: &mut App, key: KeyEvent) -> bool {
             app.close_overlay();
         }
         KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') if is_typing(&key) => {
-            if let Overlay::NewItemType { selected } = &mut app.overlay {
+            if let Overlay::NewItemType { selected, .. } = &mut app.overlay {
                 *selected = (*selected + 1) % 5;
             }
         }
         KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') if is_typing(&key) => {
-            if let Overlay::NewItemType { selected } = &mut app.overlay {
-                *selected = selected.saturating_sub(1) % 5;
+            if let Overlay::NewItemType { selected, .. } = &mut app.overlay {
+                *selected = (*selected + 4) % 5;
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') if is_typing(&key) => {
+            if let Overlay::NewItemType { dests, dest, .. } = &mut app.overlay {
+                if !dests.is_empty() {
+                    *dest = (*dest + 1) % dests.len();
+                }
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') if is_typing(&key) => {
+            if let Overlay::NewItemType { dests, dest, .. } = &mut app.overlay {
+                if !dests.is_empty() {
+                    *dest = (*dest + dests.len() - 1) % dests.len();
+                }
+            }
+        }
+        KeyCode::Char('/') if is_typing(&key) => {
+            if let Overlay::NewItemType {
+                selected,
+                dests,
+                dest,
+            } = &mut app.overlay
+            {
+                app.overlay = Overlay::NewItemDestSearch {
+                    item_type: *selected,
+                    dests: std::mem::take(dests),
+                    prev_dest: *dest,
+                    query: String::new(),
+                    selected: 0,
+                };
             }
         }
         KeyCode::Enter => {
-            let selected = match &app.overlay {
-                Overlay::NewItemType { selected } => *selected,
-                _ => 0,
+            let (selected, chosen) = match &app.overlay {
+                Overlay::NewItemType {
+                    selected,
+                    dests,
+                    dest,
+                } => (*selected, dests.get(*dest).map(|d| d.dest.clone())),
+                _ => (0, None),
             };
             app.close_overlay();
+            app.new_item_dest = chosen.unwrap_or(NewItemDest::Personal { folder_id: None });
             match selected {
                 0 => app.open_new_login(),
                 1 => app.open_new_note(),
@@ -885,6 +921,57 @@ fn handle_new_item_type(app: &mut App, key: KeyEvent) -> bool {
             }
         }
         _ => {}
+    }
+    false
+}
+
+fn handle_new_item_dest_search(app: &mut App, key: KeyEvent) -> bool {
+    let Overlay::NewItemDestSearch {
+        item_type,
+        dests,
+        prev_dest,
+        query,
+        selected,
+    } = &mut app.overlay
+    else {
+        return false;
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let matches = App::filter_new_item_dests(dests, query);
+    let step: isize = match key.code {
+        KeyCode::Down | KeyCode::Tab => 1,
+        KeyCode::Up | KeyCode::BackTab => -1,
+        KeyCode::Char('n' | 'j') if ctrl => 1,
+        KeyCode::Char('p' | 'k') if ctrl => -1,
+        _ => 0,
+    };
+    if step != 0 {
+        if !matches.is_empty() {
+            *selected = (*selected as isize + step).rem_euclid(matches.len() as isize) as usize;
+        }
+        return false;
+    }
+    let back = match key.code {
+        KeyCode::Esc => Some(*prev_dest),
+        KeyCode::Enter => Some(matches.get(*selected).copied().unwrap_or(*prev_dest)),
+        KeyCode::Backspace | KeyCode::Delete => {
+            query.pop();
+            *selected = 0;
+            None
+        }
+        KeyCode::Char(c) if is_typing(&key) => {
+            push_char(query, c);
+            *selected = 0;
+            None
+        }
+        _ => None,
+    };
+    if let Some(dest) = back {
+        app.overlay = Overlay::NewItemType {
+            selected: *item_type,
+            dests: std::mem::take(dests),
+            dest,
+        };
     }
     false
 }

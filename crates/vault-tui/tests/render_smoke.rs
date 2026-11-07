@@ -118,3 +118,25 @@ async fn theme_picker_previews_live_and_esc_reverts() {
     assert!(matches!(app.overlay, Overlay::None));
     assert_eq!(theme().name, "default", "Esc restores the original");
 }
+
+#[tokio::test]
+async fn new_item_picker_shows_save_to_row() {
+    let _g = THEME_LOCK.lock().await;
+    let mut app = mock_vault().await;
+    key(&mut app, KeyCode::Char('n')).await;
+    key(&mut app, KeyCode::Left).await;
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| vault_tui::ui::draw(f, &app)).unwrap();
+    let buf = term.backend().buffer();
+    let text: String = (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                + "\n"
+        })
+        .collect();
+    println!("{text}");
+    assert!(text.contains("Save to"), "{text}");
+    assert!(text.contains("Demo Organization / Team logins"), "{text}");
+}

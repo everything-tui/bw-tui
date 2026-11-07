@@ -1,7 +1,7 @@
 //! Vault-browser navigation and keymap dispatch, driven through the mock vault.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use vault_tui::app::{App, ClipboardKind, FocusPane, Overlay, Screen};
+use vault_tui::app::{App, ClipboardKind, FocusPane, NewItemDest, Overlay, Screen};
 use vault_tui::events::handle_event;
 use vault_tui::models::{FilterKind, ItemType};
 
@@ -270,4 +270,59 @@ async fn esc_in_generator_returns_to_form_unchanged() {
     };
     assert_eq!(name, "Example");
     assert!(password.is_empty());
+}
+
+#[tokio::test]
+async fn new_item_picker_cycles_save_destination() {
+    let mut app = mock_vault().await;
+    key(&mut app, KeyCode::Char('n')).await;
+    let Overlay::NewItemType { dests, dest, .. } = &app.overlay else {
+        panic!("n opens the new item picker");
+    };
+    assert_eq!(*dest, 0, "defaults to the personal vault outside a folder view");
+    assert!(dests
+        .iter()
+        .any(|d| matches!(d.dest, NewItemDest::Personal { folder_id: Some(_) })));
+    let last = dests.len() - 1;
+    assert!(matches!(dests[last].dest, NewItemDest::Collection { .. }));
+
+    key(&mut app, KeyCode::Left).await; // wraps to the last (org collection)
+    let Overlay::NewItemType { dest, .. } = &app.overlay else {
+        panic!("picker stays open");
+    };
+    assert_eq!(*dest, last);
+
+    key(&mut app, KeyCode::Enter).await;
+    assert!(matches!(app.overlay, Overlay::ItemForm { .. }));
+    assert!(matches!(app.new_item_dest, NewItemDest::Collection { .. }));
+}
+
+#[tokio::test]
+async fn new_item_dest_search_filters_and_picks() {
+    let mut app = mock_vault().await;
+    key(&mut app, KeyCode::Char('n')).await;
+    key(&mut app, KeyCode::Down).await; // Secure note
+    key(&mut app, KeyCode::Char('/')).await;
+    assert!(matches!(app.overlay, Overlay::NewItemDestSearch { .. }));
+    chars(&mut app, "team").await;
+    key(&mut app, KeyCode::Enter).await;
+    let Overlay::NewItemType {
+        selected,
+        dests,
+        dest,
+    } = &app.overlay
+    else {
+        panic!("Enter returns to the picker");
+    };
+    assert_eq!(*selected, 1, "item type survives the search");
+    assert_eq!(dests[*dest].label, "Demo Organization / Team logins");
+
+    // Esc keeps the previous destination.
+    key(&mut app, KeyCode::Char('/')).await;
+    chars(&mut app, "work").await;
+    key(&mut app, KeyCode::Esc).await;
+    let Overlay::NewItemType { dests, dest, .. } = &app.overlay else {
+        panic!("Esc returns to the picker");
+    };
+    assert_eq!(dests[*dest].label, "Demo Organization / Team logins");
 }

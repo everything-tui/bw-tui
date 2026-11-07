@@ -22,6 +22,7 @@ pub fn draw_overlay(frame: &mut Frame, app: &App) {
         Overlay::ItemForm { .. } => draw_item_form(frame, app),
         Overlay::NoteForm { .. } => draw_note_form(frame, app),
         Overlay::NewItemType { .. } => draw_new_item_type(frame, app),
+        Overlay::NewItemDestSearch { .. } => draw_new_item_dest_search(frame, app),
         Overlay::Generator { .. } => draw_generator(frame, app),
         Overlay::FolderForm { .. } => draw_folder_form(frame, app),
         Overlay::ConfirmDelete { .. } => draw_confirm_delete(frame, app),
@@ -347,17 +348,22 @@ fn draw_note_form(frame: &mut Frame, app: &App) {
 }
 
 fn draw_new_item_type(frame: &mut Frame, app: &App) {
-    let Overlay::NewItemType { selected } = &app.overlay else {
+    let Overlay::NewItemType {
+        selected,
+        dests,
+        dest,
+    } = &app.overlay
+    else {
         return;
     };
     let t = crate::ui::theme::theme();
     let area = frame.area();
-    let popup = center_fixed(46, 13, area);
+    let popup = center_fixed(52, 15, area);
     let inner = chrome::modal(
         frame,
         popup,
         "New item",
-        "↑↓ choose · Enter create · Esc cancel",
+        "↑↓ type · ←→ save to · / find · Enter create",
     );
     let options = [
         ("Login", "website credentials and TOTP", t.login),
@@ -366,8 +372,11 @@ fn draw_new_item_type(frame: &mut Frame, app: &App) {
         ("Identity", "name, address, documents", t.identity),
         ("SSH key", "Ed25519 key pair", t.ssh),
     ];
+    // Short terminals: drop the blank spacer rows so the "Save to" row still fits.
+    let step: u16 = if inner.height >= 12 { 2 } else { 1 };
+    let top: u16 = u16::from(inner.height >= 7);
     for (i, (label, desc, color)) in options.iter().enumerate() {
-        let y = inner.y + 1 + (i as u16) * 2;
+        let y = inner.y + top + (i as u16) * step;
         if y >= inner.bottom() {
             break;
         }
@@ -391,6 +400,124 @@ fn draw_new_item_type(frame: &mut Frame, app: &App) {
         ])
         .style(Style::default().bg(bg));
         frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
+    }
+    let dest_y = inner.y + top + 5 * step;
+    if dest_y < inner.bottom() {
+        let label = dests
+            .get(*dest)
+            .map(|d| d.label.as_str())
+            .unwrap_or("My vault");
+        let max = (inner.width as usize).saturating_sub(16);
+        let shown: String = if label.chars().count() > max {
+            let mut s: String = label.chars().take(max.saturating_sub(1)).collect();
+            s.push('…');
+            s
+        } else {
+            label.to_string()
+        };
+        let line = Line::from(vec![
+            Span::styled("  Save to  ", Style::default().fg(t.muted)),
+            Span::styled("‹ ", Style::default().fg(t.accent)),
+            Span::styled(
+                shown,
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ›", Style::default().fg(t.accent)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(inner.x, dest_y, inner.width, 1),
+        );
+    }
+}
+
+fn draw_new_item_dest_search(frame: &mut Frame, app: &App) {
+    let Overlay::NewItemDestSearch {
+        dests,
+        query,
+        selected,
+        ..
+    } = &app.overlay
+    else {
+        return;
+    };
+    let t = crate::ui::theme::theme();
+    let popup = center_fixed(64, 20, frame.area());
+    let inner = chrome::modal(
+        frame,
+        popup,
+        "Save to",
+        "type to filter · ↑↓ select · Enter choose · Esc back",
+    );
+    if inner.height < 3 {
+        return;
+    }
+    let prompt = if t.ascii { ">" } else { "›" };
+    let mut spans = vec![Span::styled(
+        format!(" {prompt} "),
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+    )];
+    if query.is_empty() {
+        spans.push(Span::styled(
+            "Search folders and collections…",
+            Style::default().fg(t.muted),
+        ));
+    } else {
+        spans.push(Span::styled(query.clone(), Style::default().fg(t.text)));
+        spans.push(Span::styled(
+            if t.ascii { "_" } else { "▏" },
+            Style::default().fg(t.accent),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(chrome::raised(t.overlay))),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let list = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let matches = App::filter_new_item_dests(dests, query);
+    if matches.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("  No matches", Style::default().fg(t.muted))),
+            list,
+        );
+        return;
+    }
+    let viewport = list.height as usize;
+    let offset = selected.saturating_sub(viewport.saturating_sub(1));
+    for (row, (i, &di)) in matches
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(viewport)
+        .enumerate()
+    {
+        let is_sel = i == *selected;
+        let bg = if is_sel { t.select_bg } else { t.overlay };
+        let line = Line::from(vec![
+            Span::styled(
+                if is_sel { "▌ " } else { "  " },
+                Style::default().fg(t.accent),
+            ),
+            Span::styled(
+                dests[di].label.clone(),
+                if is_sel {
+                    Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.text)
+                },
+            ),
+        ])
+        .style(Style::default().bg(bg));
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(list.x, list.y + row as u16, list.width, 1),
+        );
     }
 }
 

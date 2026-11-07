@@ -34,3 +34,4 @@ coverage/
 tarpaulin-report.html
 
 .cursor/
+brag-output/
