@@ -43,7 +43,7 @@ block-padding = "0.3"
 cbc = { version = "0.1", features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-crossterm = "0.28"
+crossterm = "0.29"
 directories = "6"
 fuzzy-matcher = "0.3"
 hkdf = "0.12"
