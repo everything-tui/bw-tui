@@ -9,6 +9,9 @@
 //! [`mpsc`] channel. When the helper tool is missing the monitor simply never
 //! fires (no error is surfaced).
 
+// Parts of this module are Unix-only; on Windows the shared helpers go unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};

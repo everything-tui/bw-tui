@@ -11,6 +11,9 @@
 //! Request `{ "token": "...", "method": "list", "params": {...} }`,
 //! response `{ "ok": true, "result": ... }` or `{ "ok": false, "error": "..." }`.
 
+// The daemon side is Unix-only; on Windows only the shared types and client stubs remain.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};

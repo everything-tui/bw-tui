@@ -1,6 +1,5 @@
 //! Application data directory helpers.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -94,6 +93,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
         use std::fs::OpenOptions;
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
 
         let mut file = OpenOptions::new()

@@ -859,7 +859,7 @@ mod tests {
         let (mut s, _t) = test_session();
         let uk = s.user_key.clone().unwrap();
         let enc_name = vault_crypto::encrypt_with_key("n", &s.index.org_keys["o1"]).unwrap();
-        let mut put = |s: &mut Session, id: &str, org: Option<&str>, cols: &[&str], extra| {
+        let put = |s: &mut Session, id: &str, org: Option<&str>, cols: &[&str], extra| {
             let mut c = raw_cipher(id, org, cols, extra);
             c.name = if org.is_some() {
                 enc_name.clone()

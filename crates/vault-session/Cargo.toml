@@ -16,7 +16,6 @@ webauthn = []
 [dependencies]
 vault-crypto.workspace = true
 vault-api.workspace = true
-anyhow.workspace = true
 arboard.workspace = true
 chrono.workspace = true
 directories.workspace = true
