@@ -54,7 +54,7 @@ ratatui = "0.29"
 regex = "1"
 # native-tls matches platform trust stores (and AIA intermediate fetch on macOS).
 # rustls rejects some servers that omit intermediates from their TLS chain.
-reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart"] }
 rsa = { version = "0.9", features = ["sha2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
