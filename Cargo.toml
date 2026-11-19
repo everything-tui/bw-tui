@@ -34,7 +34,7 @@ vault-crypto = { path = "crates/vault-crypto" }
 vault-api = { path = "crates/vault-api" }
 vault-session = { path = "crates/vault-session" }
 
-aes = "0.8"
+aes = "0.9"
 anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 argon2 = "0.5"
