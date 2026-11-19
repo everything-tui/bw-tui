@@ -543,7 +543,7 @@ pub async fn hibp_email_breaches(email: &str, api_key: &str) -> Result<Vec<Strin
     let resp = client
         .get(url)
         .header("hibp-api-key", api_key)
-        .header("user-agent", "bitwarden-tui")
+        .header("user-agent", "bw-tui")
         .send()
         .await?;
     parse_hibp_breach_response(resp.status().as_u16(), &resp.text().await?)

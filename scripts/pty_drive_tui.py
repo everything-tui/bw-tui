@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive bitwarden-tui under a PTY and send keystrokes for debug reproduction."""
+"""Drive bw-tui under a PTY and send keystrokes for debug reproduction."""
 
 from __future__ import annotations
 
@@ -19,18 +19,18 @@ BIN = os.path.join(
         os.path.join(ROOT, "target"),
     ),
     "debug",
-    "bitwarden-tui",
+    "bw-tui",
 )
 # Prefer workspace cargo target; fall back to sandbox cache path discovery via cargo
 def find_bin() -> str:
     candidates = [
-        os.path.join(ROOT, "target", "debug", "bitwarden-tui"),
+        os.path.join(ROOT, "target", "debug", "bw-tui"),
         BIN,
     ]
     # Also check common cargo target env
     target = os.environ.get("CARGO_TARGET_DIR")
     if target:
-        candidates.insert(0, os.path.join(target, "debug", "bitwarden-tui"))
+        candidates.insert(0, os.path.join(target, "debug", "bw-tui"))
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):
             return c
@@ -49,7 +49,7 @@ def main() -> int:
     bin_path = find_bin()
     if not os.path.isfile(bin_path):
         print(f"binary missing: {bin_path}", file=sys.stderr)
-        print("Run: cargo build -p vault-tui", file=sys.stderr)
+        print("Run: cargo build -p bw-tui", file=sys.stderr)
         return 2
 
     argv = [bin_path, "--mock", "--server", "http://127.0.0.1:8080"]

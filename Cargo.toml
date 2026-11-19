@@ -4,15 +4,16 @@ members = [
     "crates/vault-crypto",
     "crates/vault-api",
     "crates/vault-session",
-    "crates/vault-tui",
+    "crates/bw-tui",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-authors = ["bitwarden-tui contributors"]
+authors = ["everything-tui contributors"]
 repository = "https://github.com/everything-tui/bw-tui"
+homepage = "https://github.com/everything-tui/bw-tui"
 
 # Master-key derivation (600k PBKDF2 / Argon2) is ~25x slower unoptimized.
 # Optimize vault-crypto only — blanket dep opt-level 3 bloated target/ massively.

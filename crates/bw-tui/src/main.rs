@@ -1,4 +1,4 @@
-//! bitwarden-tui — Vaultwarden password manager terminal UI.
+//! bw-tui — Vaultwarden password manager terminal UI.
 
 use std::io::{self, stdout, Write};
 use std::panic;
@@ -7,6 +7,11 @@ use std::sync::{Once, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bw_tui::app::{self, App};
+use bw_tui::cli::{GenerateOpts, ListOpts};
+use bw_tui::events;
+use bw_tui::profiles::{load_registry_from, profile_has_auth};
+use bw_tui::ui::{self, PaneVisibility};
 use clap::{CommandFactory, Parser};
 use clap_complete::{generate, Shell};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
@@ -18,11 +23,6 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tracing_subscriber::EnvFilter;
 use vault_session::app_data_dir;
-use vault_tui::app::{self, App};
-use vault_tui::cli::{GenerateOpts, ListOpts};
-use vault_tui::events;
-use vault_tui::profiles::{load_registry_from, profile_has_auth};
-use vault_tui::ui::{self, PaneVisibility};
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
@@ -275,7 +275,7 @@ enum SendCmd {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "bitwarden-tui",
+    name = "bw-tui",
     about = "Terminal UI client for Vaultwarden / Bitwarden",
     version
 )]
@@ -323,7 +323,7 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("vault_tui=info".parse()?))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("bw_tui=info".parse()?))
         .with_writer(io::stderr)
         .init();
 
@@ -338,7 +338,7 @@ async fn run() -> Result<()> {
         // Commands that need no profile / unlock
         match cmd {
             Commands::Encode { input, decode } => {
-                vault_tui::cli_account::cmd_encode(input.as_deref(), *decode)?;
+                bw_tui::cli_account::cmd_encode(input.as_deref(), *decode)?;
                 return Ok(());
             }
             Commands::Completions { shell } => {
@@ -354,13 +354,8 @@ async fn run() -> Result<()> {
                 password,
                 output,
             } => {
-                vault_tui::cli_send::cmd_receive(
-                    cli.json,
-                    url,
-                    password.as_deref(),
-                    output.clone(),
-                )
-                .await?;
+                bw_tui::cli_send::cmd_receive(cli.json, url, password.as_deref(), output.clone())
+                    .await?;
                 return Ok(());
             }
             Commands::Generate {
@@ -377,19 +372,16 @@ async fn run() -> Result<()> {
                 apply_org_policy,
             } => {
                 let org_policy = if *apply_org_policy {
-                    let ctx = vault_tui::cli::CliCtx::load(
-                        app_data_dir(),
-                        cli.profile.clone(),
-                        cli.json,
-                    )?;
-                    let mut session = vault_tui::cli::unlock_session_for_generate(&ctx).await?;
+                    let ctx =
+                        bw_tui::cli::CliCtx::load(app_data_dir(), cli.profile.clone(), cli.json)?;
+                    let mut session = bw_tui::cli::unlock_session_for_generate(&ctx).await?;
                     let policy = session.generator_policy();
                     session.lock();
                     Some(policy)
                 } else {
                     None
                 };
-                vault_tui::cli::cmd_generate(
+                bw_tui::cli::cmd_generate(
                     GenerateOpts {
                         length: *length,
                         passphrase: *passphrase,
@@ -410,10 +402,10 @@ async fn run() -> Result<()> {
             _ => {}
         }
 
-        let ctx = vault_tui::cli::CliCtx::load(app_data_dir(), cli.profile.clone(), cli.json)?
+        let ctx = bw_tui::cli::CliCtx::load(app_data_dir(), cli.profile.clone(), cli.json)?
             .with_session(cli.session.clone());
         match cmd {
-            Commands::Status => vault_tui::cli::cmd_status(&ctx).await?,
+            Commands::Status => bw_tui::cli::cmd_status(&ctx).await?,
             Commands::Login {
                 email,
                 server,
@@ -421,9 +413,9 @@ async fn run() -> Result<()> {
                 code,
                 method,
             } => {
-                vault_tui::cli_account::cmd_login(
+                bw_tui::cli_account::cmd_login(
                     &ctx,
-                    vault_tui::cli_account::LoginOpts {
+                    bw_tui::cli_account::LoginOpts {
                         email: email.clone().or(cli.email.clone()),
                         server: server.clone().or(cli.server.clone()),
                         apikey: *apikey,
@@ -433,13 +425,13 @@ async fn run() -> Result<()> {
                 )
                 .await?
             }
-            Commands::Logout => vault_tui::cli_account::cmd_logout(&ctx).await?,
-            Commands::Unlock { raw } => vault_tui::cli_account::cmd_unlock(&ctx, *raw).await?,
-            Commands::Lock => vault_tui::cli_account::cmd_lock(&ctx).await?,
+            Commands::Logout => bw_tui::cli_account::cmd_logout(&ctx).await?,
+            Commands::Unlock { raw } => bw_tui::cli_account::cmd_unlock(&ctx, *raw).await?,
+            Commands::Lock => bw_tui::cli_account::cmd_lock(&ctx).await?,
             Commands::Config { action, value } => match action.as_deref() {
-                None => vault_tui::cli_account::cmd_config_show(&ctx).await?,
+                None => bw_tui::cli_account::cmd_config_show(&ctx).await?,
                 Some("server") => {
-                    vault_tui::cli_account::cmd_config_server(&ctx, value.as_deref()).await?
+                    bw_tui::cli_account::cmd_config_server(&ctx, value.as_deref()).await?
                 }
                 Some(other) => anyhow::bail!("unknown config action `{other}` (server)"),
             },
@@ -448,8 +440,7 @@ async fn run() -> Result<()> {
                 port,
                 token,
             } => {
-                vault_tui::cli_account::cmd_serve(&ctx, hostname.clone(), *port, token.clone())
-                    .await?
+                bw_tui::cli_account::cmd_serve(&ctx, hostname.clone(), *port, token.clone()).await?
             }
             Commands::List {
                 search,
@@ -462,7 +453,7 @@ async fn run() -> Result<()> {
                 format,
                 template,
             } => {
-                vault_tui::cli::cmd_list(
+                bw_tui::cli::cmd_list(
                     &ctx,
                     ListOpts {
                         search: search.clone(),
@@ -502,41 +493,39 @@ async fn run() -> Result<()> {
                 match (query.as_deref(), target.as_deref()) {
                     // `get <kind> <id>` (bw style)
                     (Some(kind), Some(t)) if KINDS.contains(&kind) => {
-                        vault_tui::cli::cmd_get_what(&ctx, kind, Some(t), uri.as_deref()).await?
+                        bw_tui::cli::cmd_get_what(&ctx, kind, Some(t), uri.as_deref()).await?
                     }
                     (Some(_), Some(_)) => anyhow::bail!(
                         "unexpected second argument — use `get <kind> <id>` or `get <id> --field <field>`"
                     ),
-                    (q, None) => vault_tui::cli::cmd_get(&ctx, q, uri.as_deref(), field).await?,
+                    (q, None) => bw_tui::cli::cmd_get(&ctx, q, uri.as_deref(), field).await?,
                     (None, Some(_)) => unreachable!("clap fills positionals in order"),
                 }
             }
             Commands::Create { kind, data } => {
-                vault_tui::cli::cmd_create(&ctx, kind, data.as_deref()).await?
+                bw_tui::cli::cmd_create(&ctx, kind, data.as_deref()).await?
             }
             Commands::Edit { kind, id, data } => {
-                vault_tui::cli::cmd_edit(&ctx, kind, id, data.as_deref()).await?
+                bw_tui::cli::cmd_edit(&ctx, kind, id, data.as_deref()).await?
             }
-            Commands::Restore { query } => vault_tui::cli::cmd_restore(&ctx, query).await?,
-            Commands::Move { query, folder } => {
-                vault_tui::cli::cmd_move(&ctx, query, folder).await?
-            }
+            Commands::Restore { query } => bw_tui::cli::cmd_restore(&ctx, query).await?,
+            Commands::Move { query, folder } => bw_tui::cli::cmd_move(&ctx, query, folder).await?,
             Commands::Share {
                 query,
                 organization,
                 collections,
-            } => vault_tui::cli::cmd_share(&ctx, query, organization, collections.clone()).await?,
-            Commands::Totp { query } => vault_tui::cli::cmd_totp(&ctx, query).await?,
-            Commands::Sync => vault_tui::cli::cmd_sync(&ctx).await?,
+            } => bw_tui::cli::cmd_share(&ctx, query, organization, collections.clone()).await?,
+            Commands::Totp { query } => bw_tui::cli::cmd_totp(&ctx, query).await?,
+            Commands::Sync => bw_tui::cli::cmd_sync(&ctx).await?,
             Commands::Delete {
                 query,
                 permanent,
                 folder,
             } => {
                 if *folder {
-                    vault_tui::cli::cmd_delete_folder(&ctx, query).await?
+                    bw_tui::cli::cmd_delete_folder(&ctx, query).await?
                 } else {
-                    vault_tui::cli::cmd_delete(&ctx, query, *permanent).await?
+                    bw_tui::cli::cmd_delete(&ctx, query, *permanent).await?
                 }
             }
             Commands::Send { action } => match action {
@@ -552,9 +541,9 @@ async fn run() -> Result<()> {
                     hide_email,
                     hidden,
                 } => {
-                    vault_tui::cli_send::cmd_send_create(
+                    bw_tui::cli_send::cmd_send_create(
                         &ctx,
-                        vault_tui::cli_send::SendCreateOpts {
+                        bw_tui::cli_send::SendCreateOpts {
                             text: text.clone(),
                             file: file.clone(),
                             name: name.clone(),
@@ -569,20 +558,18 @@ async fn run() -> Result<()> {
                     )
                     .await?
                 }
-                SendCmd::List => vault_tui::cli_send::cmd_send_list(&ctx).await?,
-                SendCmd::Delete { query } => {
-                    vault_tui::cli_send::cmd_send_delete(&ctx, query).await?
-                }
-                SendCmd::Link { query } => vault_tui::cli_send::cmd_send_link(&ctx, query).await?,
+                SendCmd::List => bw_tui::cli_send::cmd_send_list(&ctx).await?,
+                SendCmd::Delete { query } => bw_tui::cli_send::cmd_send_delete(&ctx, query).await?,
+                SendCmd::Link { query } => bw_tui::cli_send::cmd_send_link(&ctx, query).await?,
             },
-            Commands::GitCredential => vault_tui::cli::cmd_git_credential(&ctx).await?,
+            Commands::GitCredential => bw_tui::cli::cmd_git_credential(&ctx).await?,
             Commands::Askpass { prompt } => {
                 let joined = if prompt.is_empty() {
                     None
                 } else {
                     Some(prompt.join(" "))
                 };
-                vault_tui::cli::cmd_askpass(&ctx, joined).await?
+                bw_tui::cli::cmd_askpass(&ctx, joined).await?
             }
             Commands::Export {
                 path,
@@ -591,7 +578,7 @@ async fn run() -> Result<()> {
                 password,
                 organization,
             } => {
-                vault_tui::cli::cmd_export(
+                bw_tui::cli::cmd_export(
                     &ctx,
                     path,
                     format,
@@ -606,12 +593,11 @@ async fn run() -> Result<()> {
                 format,
                 password,
             } => {
-                vault_tui::cli::cmd_import(&ctx, path, format.as_deref(), password.as_deref())
-                    .await?
+                bw_tui::cli::cmd_import(&ctx, path, format.as_deref(), password.as_deref()).await?
             }
             Commands::AgentRun => {
                 let profile = ctx.profile();
-                vault_tui::agent::run_daemon(
+                bw_tui::agent::run_daemon(
                     ctx.data_dir(),
                     ctx.profile_id.clone(),
                     vault_session::plaintext_token_allowed(profile.allow_plaintext_token),
@@ -792,7 +778,7 @@ async fn run_loop(
 fn run_external_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    mut req: vault_tui::app::EditorRequest,
+    mut req: bw_tui::app::EditorRequest,
 ) -> Result<()> {
     use zeroize::Zeroize;
     disable_raw_mode().ok();
@@ -803,7 +789,7 @@ fn run_external_editor(
         crossterm::cursor::Show
     )
     .ok();
-    let result = vault_tui::editor::edit_text(&req.initial);
+    let result = bw_tui::editor::edit_text(&req.initial);
     req.initial.zeroize();
     enable_raw_mode().context("re-enable raw mode")?;
     execute!(terminal.backend_mut(), EnterAlternateScreen).context("re-enter alternate screen")?;

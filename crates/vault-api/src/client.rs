@@ -30,7 +30,7 @@ impl ClientConfig {
         Ok(Self {
             base_url,
             device_id: Uuid::new_v4().to_string(),
-            device_name: "bitwarden-tui".to_string(),
+            device_name: "bw-tui".to_string(),
         })
     }
 
@@ -43,7 +43,7 @@ impl ClientConfig {
         Self {
             base_url,
             device_id: Uuid::new_v4().to_string(),
-            device_name: "bitwarden-tui".to_string(),
+            device_name: "bw-tui".to_string(),
         }
     }
 }
@@ -146,7 +146,10 @@ pub struct VaultClient {
 impl VaultClient {
     pub fn new(config: ClientConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("bitwarden-tui/0.1.0"));
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!("bw-tui/", env!("CARGO_PKG_VERSION"))),
+        );
         headers.insert(
             "Bitwarden-Client-Name",
             HeaderValue::from_static(CLIENT_NAME),

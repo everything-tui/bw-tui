@@ -26,10 +26,10 @@ main() {
   if cargo test --workspace --tests -- --list 2>/dev/null | grep -qiE 'integration|e2e|vaultwarden'; then
     cargo test --workspace --tests -- --nocapture \
       --test-threads=1 \
-      2>&1 | tee /tmp/bitwarden-tui-e2e.log || rc=$?
+      2>&1 | tee /tmp/bw-tui-e2e.log || rc=$?
   else
     log "No named integration/e2e tests found yet; running workspace tests..."
-    cargo test --workspace -- --nocapture 2>&1 | tee /tmp/bitwarden-tui-e2e.log || rc=$?
+    cargo test --workspace -- --nocapture 2>&1 | tee /tmp/bw-tui-e2e.log || rc=$?
   fi
 
   echo
@@ -40,7 +40,7 @@ main() {
     exit 0
   else
     log "RESULT: FAIL (exit ${rc})"
-    log "Full log: /tmp/bitwarden-tui-e2e.log"
+    log "Full log: /tmp/bw-tui-e2e.log"
     docker compose -f "${COMPOSE_FILE}" ps || true
     exit "${rc}"
   fi

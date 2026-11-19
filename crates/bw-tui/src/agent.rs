@@ -1,7 +1,7 @@
 //! Unlock daemon: a per-profile background process that keeps one unlocked
 //! [`Session`] in memory and serves it over a Unix socket.
 //!
-//! `bitwarden-tui unlock` prints a `BW_SESSION` token. Any later CLI invocation that sees
+//! `bw-tui unlock` prints a `BW_SESSION` token. Any later CLI invocation that sees
 //! `BW_SESSION` (or `--session`) talks to the daemon instead of prompting for the master
 //! password. The socket lives in a `0700` directory with mode `0600` and every request must
 //! carry the token. The daemon exits (and zeroizes the session) on `lock`, or when the
@@ -76,13 +76,13 @@ fn ct_eq(a: &str, b: &str) -> bool {
 /// Directory that holds agent sockets (short path: `sockaddr_un` is ~104 bytes on macOS).
 pub fn socket_dir() -> PathBuf {
     if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(rt).join("bitwarden-tui");
+        return PathBuf::from(rt).join("bw-tui");
     }
     #[cfg(unix)]
     let uid = unsafe { libc::getuid() };
     #[cfg(not(unix))]
     let uid = 0u32;
-    std::env::temp_dir().join(format!("bitwarden-tui-{uid}"))
+    std::env::temp_dir().join(format!("bw-tui-{uid}"))
 }
 
 pub fn socket_path(profile_id: &str) -> PathBuf {

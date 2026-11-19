@@ -1,10 +1,10 @@
 //! P4 power-user features driven through the mock vault.
 
+use bw_tui::app::{App, FocusPane, Overlay, PowerOverlay, Screen, SortMode};
+use bw_tui::events::handle_event;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use vault_tui::app::{App, FocusPane, Overlay, PowerOverlay, Screen, SortMode};
-use vault_tui::events::handle_event;
 
 fn press(code: KeyCode) -> Event {
     Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -186,7 +186,7 @@ async fn mouse_click_selects_item_and_wheel_scrolls() {
 
     // Draw a frame first (the real loop always does): clicks hit-test against it.
     let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
-    term.draw(|f| vault_tui::ui::draw(f, &app)).unwrap();
+    term.draw(|f| bw_tui::ui::draw(f, &app)).unwrap();
     let (row, column) = {
         let hit = app.hitmap.borrow();
         let row = hit.item_rows.iter().find(|(_, i)| *i == 2).unwrap().0;
@@ -219,7 +219,7 @@ async fn mouse_click_selects_item_and_wheel_scrolls() {
 
 #[tokio::test]
 async fn ssh_agent_confirmation_prompt_returns_to_previous_overlay() {
-    use vault_tui::app::ssh_confirm_overlay;
+    use bw_tui::app::ssh_confirm_overlay;
     let mut app = mock_vault().await;
     app.overlay = ssh_confirm_overlay(
         Overlay::AccountSettings {

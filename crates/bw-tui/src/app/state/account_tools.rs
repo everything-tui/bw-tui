@@ -270,7 +270,7 @@ impl App {
             match load_forwarder_credentials(&self.active_profile_id, svc) {
                 Ok(Some(creds)) => {
                     self.set_status(format!("Creating {} alias…", svc.label()));
-                    generate_forwarded_alias_blocking(svc, &creds, "Created by bitwarden-tui")
+                    generate_forwarded_alias_blocking(svc, &creds, "Created by bw-tui")
                 }
                 Ok(None) => Err(format!(
                     "no {} token — Account settings → a → 7",
@@ -780,7 +780,7 @@ pub async fn account_tools_handle_key(app: &mut App, key: KeyEvent) -> bool {
                     Err(e) => app.tools_msg(e.to_string(), true),
                 }
             }
-            KeyCode::Char('t') if typing => match biometric_authenticate("Unlock Bitwarden TUI") {
+            KeyCode::Char('t') if typing => match biometric_authenticate("Unlock bw-tui") {
                 Ok(()) => app.tools_msg("Biometric check passed", false),
                 Err(e) => app.tools_msg(e.to_string(), true),
             },

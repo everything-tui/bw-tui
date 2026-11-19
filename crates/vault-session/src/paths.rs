@@ -9,9 +9,30 @@ use crate::error::{Result, SessionError};
 
 /// Root application data directory (shared by all profiles).
 pub fn app_data_dir() -> PathBuf {
-    ProjectDirs::from("com", "bitwarden-tui", "bitwarden-tui")
-        .map(|p| p.data_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".bitwarden-tui"))
+    let Some(dirs) = ProjectDirs::from("com", "everything-tui", "bw-tui") else {
+        return PathBuf::from(".bw-tui");
+    };
+    let dir = dirs.data_dir().to_path_buf();
+    migrate_legacy_data_dir(&dir);
+    dir
+}
+
+/// One-time move of data written under the pre-rename `bitwarden-tui` directory.
+fn migrate_legacy_data_dir(new_dir: &Path) {
+    if new_dir.exists() {
+        return;
+    }
+    let Some(legacy) = ProjectDirs::from("com", "bitwarden-tui", "bitwarden-tui") else {
+        return;
+    };
+    let old_dir = legacy.data_dir();
+    if !old_dir.is_dir() {
+        return;
+    }
+    if let Some(parent) = new_dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::rename(old_dir, new_dir);
 }
 
 /// Directory containing per-profile subdirectories.

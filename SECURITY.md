@@ -2,7 +2,7 @@
 
 ## Threat model
 
-`bitwarden-tui` is a local terminal client for Vaultwarden / Bitwarden-compatible servers.
+`bw-tui` is a local terminal client for Vaultwarden / Bitwarden-compatible servers.
 
 **In scope**
 

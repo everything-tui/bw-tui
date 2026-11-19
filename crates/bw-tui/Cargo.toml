@@ -1,14 +1,15 @@
 [package]
-name = "vault-tui"
+name = "bw-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Terminal UI for Vaultwarden"
-default-run = "bitwarden-tui"
+default-run = "bw-tui"
 
 [[bin]]
-name = "bitwarden-tui"
+name = "bw-tui"
 path = "src/main.rs"
 
 [dependencies]
@@ -45,6 +46,10 @@ webauthn = ["vault-session/webauthn"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# musl has no system OpenSSL: build it from source so the binary is fully static.
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 tempfile = "3"

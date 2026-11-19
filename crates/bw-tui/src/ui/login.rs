@@ -269,7 +269,7 @@ fn draw_brand(frame: &mut Frame, area: Rect, subtitle: &str) {
         Line::from(vec![
             Span::styled(format!("{glyph}  "), Style::default().fg(pal::accent())),
             Span::styled(
-                "bitwarden-tui",
+                "bw-tui",
                 Style::default()
                     .fg(pal::text())
                     .add_modifier(Modifier::BOLD),

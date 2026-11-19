@@ -1,32 +1,115 @@
-# bitwarden-tui
+# bw-tui
 
 Terminal UI client for [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (Bitwarden-compatible password manager API). Browse vault items, copy credentials, and manage a local session from the terminal.
 
 ## Install
 
-### Prebuilt binaries
+### Homebrew (macOS / Linux)
 
-Download archives for Linux, macOS, and Windows from the [GitHub Releases](https://github.com/everything-tui/bw-tui/releases) page, or use an installer:
+```bash
+brew install everything-tui/tap/bw-tui
+```
+
+Update later with `brew upgrade bw-tui`.
+
+### Installer scripts
 
 ```bash
 # Linux / macOS
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/everything-tui/bw-tui/releases/latest/download/vault-tui-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/everything-tui/bw-tui/releases/latest/download/bw-tui-installer.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/everything-tui/bw-tui/releases/latest/download/vault-tui-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/everything-tui/bw-tui/releases/latest/download/bw-tui-installer.ps1 | iex"
 ```
 
-The installers place the `bitwarden-tui` binary on your `PATH` (under `CARGO_HOME` by default).
+The installers place the `bw-tui` binary on your `PATH` (under `CARGO_HOME` by default).
+
+### Prebuilt binaries
+
+Every [GitHub Release](https://github.com/everything-tui/bw-tui/releases) has these archives. Each comes with a `.sha256` checksum:
+
+| Platform | Archive |
+|---|---|
+| macOS, Apple Silicon | `bw-tui-aarch64-apple-darwin.tar.xz` |
+| macOS, Intel | `bw-tui-x86_64-apple-darwin.tar.xz` |
+| Linux x86_64 (glibc) | `bw-tui-x86_64-unknown-linux-gnu.tar.xz` |
+| Linux arm64 (glibc) | `bw-tui-aarch64-unknown-linux-gnu.tar.xz` |
+| Linux x86_64 (static, musl) | `bw-tui-x86_64-unknown-linux-musl.tar.xz` |
+| Linux arm64 (static, musl) | `bw-tui-aarch64-unknown-linux-musl.tar.xz` |
+| Windows x86_64 | `bw-tui-x86_64-pc-windows-msvc.zip` |
+| Windows ARM64 | `bw-tui-aarch64-pc-windows-msvc.zip` |
+
+The musl builds are fully static, so they run on any Linux distribution, including Alpine and old glibc systems. Pick them if the glibc build fails with a `GLIBC_x.y not found` error.
 
 ### Build from source
 
+You need the stable Rust toolchain from [rustup](https://rustup.rs). Then, from the repository root:
+
 ```bash
-cargo build --release
+cargo install --path crates/bw-tui --locked
 ```
 
-Binary: `target/release/bitwarden-tui`
+That puts `bw-tui` in `~/.cargo/bin`. To get just the binary in `target/release/bw-tui` instead, run `cargo build --release`.
+
+Prerequisites for each platform:
+
+**macOS**
+
+```bash
+xcode-select --install
+```
+
+**Linux (Debian / Ubuntu)**
+
+```bash
+sudo apt install build-essential pkg-config libssl-dev
+```
+
+On Fedora: `sudo dnf install gcc pkgconf-pkg-config openssl-devel`. On Arch: `sudo pacman -S base-devel openssl`.
+Auto-type also needs `xdotool` (X11) or `wtype` (Wayland) at runtime.
+
+**Linux, static musl binary**
+
+OpenSSL is compiled from source automatically, so you need `perl` and `make` but no `libssl-dev`:
+
+```bash
+sudo apt install musl-tools perl make
+```
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+```
+
+```bash
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+Binary: `target/x86_64-unknown-linux-musl/release/bw-tui`. On arm64, use `aarch64-unknown-linux-musl`.
+
+**Windows**
+
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) and select the "Desktop development with C++" workload. Then run `cargo build --release` in PowerShell. Binary: `target\release\bw-tui.exe`.
+
+To build for Windows ARM64, also install the "MSVC ARM64 build tools" component, then run:
+
+```powershell
+rustup target add aarch64-pc-windows-msvc
+cargo build --release --target aarch64-pc-windows-msvc
+```
+
+### Platform support
+
+The core TUI (browse, search, edit, copy, Sends) works on every platform. These features depend on the OS:
+
+| Feature | macOS | Linux | Windows |
+|---|---|---|---|
+| Background agent (stays unlocked between runs) | ✅ | ✅ | ❌ |
+| SSH agent integration | ✅ | ✅ | ❌ |
+| Lock on system sleep | ✅ | ✅ (needs D-Bus) | ❌ |
+| Auto-type | ✅ (`osascript`) | ✅ (`xdotool` / `wtype`) | ❌ |
+| Biometric unlock (`biometric` feature) | ✅ | ❌ | ❌ |
 
 ## Run against Vaultwarden
 
@@ -34,7 +117,7 @@ Binary: `target/release/bitwarden-tui`
 
    ```bash
    # Example: local Vaultwarden from docker/compose.yml
-   ./target/release/bitwarden-tui --server http://127.0.0.1:8080
+   ./target/release/bw-tui --server http://127.0.0.1:8080
    ```
 
 2. Sign in with your Vaultwarden email and master password when prompted.
@@ -44,8 +127,8 @@ Binary: `target/release/bitwarden-tui`
 Use named profiles (e.g. `work`, `home`) so each account has its own server, email, and remembered session:
 
 ```bash
-./target/release/bitwarden-tui --profile work
-./target/release/bitwarden-tui --list-profiles
+./target/release/bw-tui --profile work
+./target/release/bw-tui --list-profiles
 ```
 
 In the TUI, press **Ctrl+p** to create, edit, delete, or switch profiles. On the unlock screen, **Ctrl+o** signs out of the current profile only (other profiles keep their saved sessions).
@@ -66,7 +149,7 @@ Environment overrides:
 
 ### On-disk layout
 
-Under the app data directory (`~/Library/Application Support/com.bitwarden-tui.bitwarden-tui/` on macOS, `~/.local/share/bitwarden-tui/` on Linux):
+Under the app data directory (`~/Library/Application Support/com.everything-tui.bw-tui/` on macOS, `~/.local/share/bw-tui/` on Linux):
 
 ```text
 config.toml                   # theme, generator defaults, background sync interval, keybinding overrides
@@ -167,46 +250,46 @@ Sign in once via the TUI or `login`, then use subcommands. Prefer the unlock dae
 
 ```bash
 # Account / daemon (like BW_SESSION)
-bitwarden-tui login --email you@example.com --server https://vault.example.com
-bitwarden-tui unlock          # prints: export BW_SESSION="…"
-bitwarden-tui lock
-bitwarden-tui logout
-bitwarden-tui config server https://vault.example.com
-bitwarden-tui encode 'hello' # base64 ( --decode reverses )
-bitwarden-tui serve --port 8087   # localhost REST API; token printed or BW_SERVE_TOKEN
+bw-tui login --email you@example.com --server https://vault.example.com
+bw-tui unlock          # prints: export BW_SESSION="…"
+bw-tui lock
+bw-tui logout
+bw-tui config server https://vault.example.com
+bw-tui encode 'hello' # base64 ( --decode reverses )
+bw-tui serve --port 8087   # localhost REST API; token printed or BW_SERVE_TOKEN
 
 # Vault
-bitwarden-tui --profile work status
-bitwarden-tui --json list --search github --type login
-bitwarden-tui list --format template --template '{name}\t{username}'   # fzf / rofi friendly
-bitwarden-tui get "GitHub" --field password
-bitwarden-tui get --uri https://github.com/login --field password
-bitwarden-tui create item '{"type":1,"name":"Site","login":{"username":"u","password":"p"}}'
-bitwarden-tui edit item Site '{"login":{"password":"new"}}'
-bitwarden-tui restore "Old item"
-bitwarden-tui move "Site" "Work"
-bitwarden-tui share "Site" "My Org" --collection "Shared"
-bitwarden-tui totp "GitHub"
-bitwarden-tui generate --length 24
-bitwarden-tui generate --apply-org-policy   # unlock + clamp to org generator policy
-bitwarden-tui sync
-bitwarden-tui export backup.json --format json
-bitwarden-tui export vault.zip --format zip
-bitwarden-tui export encrypted.json --encrypted --password 'export-pass'
-bitwarden-tui import backup.json
-bitwarden-tui import chrome.csv --format chrome-csv
-bitwarden-tui delete "Old item"
+bw-tui --profile work status
+bw-tui --json list --search github --type login
+bw-tui list --format template --template '{name}\t{username}'   # fzf / rofi friendly
+bw-tui get "GitHub" --field password
+bw-tui get --uri https://github.com/login --field password
+bw-tui create item '{"type":1,"name":"Site","login":{"username":"u","password":"p"}}'
+bw-tui edit item Site '{"login":{"password":"new"}}'
+bw-tui restore "Old item"
+bw-tui move "Site" "Work"
+bw-tui share "Site" "My Org" --collection "Shared"
+bw-tui totp "GitHub"
+bw-tui generate --length 24
+bw-tui generate --apply-org-policy   # unlock + clamp to org generator policy
+bw-tui sync
+bw-tui export backup.json --format json
+bw-tui export vault.zip --format zip
+bw-tui export encrypted.json --encrypted --password 'export-pass'
+bw-tui import backup.json
+bw-tui import chrome.csv --format chrome-csv
+bw-tui delete "Old item"
 # Sends (create/list need an unlocked session; receive needs no login at all):
-bitwarden-tui send create "text body" --name Note --password pw --max-access 3 --delete-in 2d --hide-email
-bitwarden-tui send create --file ./report.pdf --name Report --expires 12h
-bitwarden-tui send list
-bitwarden-tui receive 'https://vault.example.com/#/send/<id>/<key>' [--password pw] [-o dir-or-file]
+bw-tui send create "text body" --name Note --password pw --max-access 3 --delete-in 2d --hide-email
+bw-tui send create --file ./report.pdf --name Report --expires 12h
+bw-tui send list
+bw-tui receive 'https://vault.example.com/#/send/<id>/<key>' [--password pw] [-o dir-or-file]
 # Shell integration
-bitwarden-tui completions zsh > ~/.zfunc/_bitwarden-tui
-bitwarden-tui man | mandoc -Tascii | less
+bw-tui completions zsh > ~/.zfunc/_bw-tui
+bw-tui man | mandoc -Tascii | less
 # git / SSH helpers (after unlock):
-git -c credential.helper='!bitwarden-tui git-credential' clone …
-BW_PASSWORD=… bitwarden-tui askpass --prompt 'user@host'
+git -c credential.helper='!bw-tui git-credential' clone …
+BW_PASSWORD=… bw-tui askpass --prompt 'user@host'
 ```
 
 In the TUI, open **Account** (`,`) to set a PIN for quick unlock, change your master password, or start a profile-local **SSH agent** (Unix; requires `ssh-agent` / `ssh-add` on `PATH`). The agent stops when you lock the vault. Export `SSH_AUTH_SOCK` from the status line message for child shells.
@@ -257,8 +340,49 @@ Stop / reset:
 ```bash
 docker compose -f docker/compose.yml down
 # optional: wipe persisted vault data
-docker volume rm bitwarden-tui-vw-data
+docker volume rm bw-tui-vw-data
 ```
+
+## Versioning & releases
+
+The version lives in three places that must always match:
+
+- the top heading of `CHANGELOG.md`: `## [X.Y.Z] - YYYY-MM-DD` (no `## Unreleased`)
+- `[workspace.package] version` in `Cargo.toml` (all crates inherit it)
+- the `bw-tui` entry in `Cargo.lock` (run `cargo update --workspace` after a bump)
+
+Check them locally:
+
+```bash
+scripts/version.sh check
+```
+
+Versions stay on `0.x.y`: a fix-only batch bumps the patch, anything with new or changed behavior bumps the minor. Sections are `Added`, `Modified`, `Fixed`, `Removed` (and `Security`).
+
+**Branches**
+
+- `main`: day-to-day work. Every PR runs the `Validate Version` check above.
+- `publish`: release branch. A PR into `publish` also fails if the version already has a release or isn't newer than the latest one.
+
+**Cutting a release**
+
+1. Make sure the top CHANGELOG entry and `Cargo.toml` have the new version (`scripts/version.sh check`).
+2. Open a PR from `main` into `publish` and merge it.
+3. `Create Release` runs on the push to `publish`, validates the version and starts `Release` with tag `vX.Y.Z`. If that version is already released, it does nothing.
+4. `Release` (cargo-dist) builds all 8 targets, creates the tag and the GitHub Release with archives, checksums and installers, and pushes the Homebrew formula.
+5. `Release notes` then rewrites the release page:
+   - title: `X.Y.Z - YYYY-MM-DD`
+   - every CHANGELOG entry since the previous release
+   - install commands and a downloads table
+   - a compare link and a link to the full CHANGELOG
+
+Preview the release page text locally:
+
+```bash
+scripts/version.sh body
+```
+
+The release workflow (`.github/workflows/release.yml`) is generated by cargo-dist. Change `dist-workspace.toml` and run `dist generate` instead of editing it by hand.
 
 ## Workspace layout
 
@@ -267,7 +391,7 @@ docker volume rm bitwarden-tui-vw-data
 | `vault-crypto` | KDF, AES, key wrapping |
 | `vault-api` | HTTP client / models |
 | `vault-session` | Session & sync |
-| `vault-tui` | Ratatui frontend (`bitwarden-tui` binary) |
+| `bw-tui` | Ratatui frontend (`bw-tui` binary) |
 
 ## License
 

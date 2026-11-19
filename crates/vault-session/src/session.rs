@@ -2363,7 +2363,7 @@ fn totp_from_secret_inner(secret_or_uri: &str) -> Result<TOTP> {
         30,
         secret,
         None,
-        "bitwarden-tui".to_string(),
+        "bw-tui".to_string(),
     )
     .map_err(|e| SessionError::Other(e.to_string()))
 }

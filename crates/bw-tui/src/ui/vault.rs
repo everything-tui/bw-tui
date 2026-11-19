@@ -76,7 +76,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "bitwarden-tui",
+            "bw-tui",
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -353,7 +353,10 @@ fn draw_list_header(
     let used: usize = spans.iter().map(|s| s.width()).sum();
     let gap = (area.width as usize).saturating_sub(used + right.chars().count() + 1);
     spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(Span::styled(format!("{right} "), Style::new().fg(t.subtext)));
+    spans.push(Span::styled(
+        format!("{right} "),
+        Style::new().fg(t.subtext),
+    ));
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::new().bg(t.base)),
         area,
@@ -753,7 +756,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 item.totp.as_ref().map(|_| "configured".to_string())
             };
-            kv(&mut lines, width, "One-time code", totp_label.as_deref(), &k_totp);
+            kv(
+                &mut lines,
+                width,
+                "One-time code",
+                totp_label.as_deref(),
+                &k_totp,
+            );
             if app.reveal_secrets && has_totp_code {
                 // Tint the freshly pushed value line like a live code.
                 if let Some(l) = lines.len().checked_sub(2).and_then(|i| lines.get_mut(i)) {
@@ -1100,7 +1109,11 @@ fn kv(lines: &mut Vec<Line>, width: u16, label: &str, value: Option<&str>, key: 
         _ => ("—".to_string(), Style::new().fg(t.muted)),
     };
     field_label(lines, label);
-    lines.push(value_row(vec![Span::styled(value, value_style)], width, cap));
+    lines.push(value_row(
+        vec![Span::styled(value, value_style)],
+        width,
+        cap,
+    ));
     lines.push(Line::from(""));
 }
 

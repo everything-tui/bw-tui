@@ -6,7 +6,7 @@ use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const SERVICE_NAME: &str = "com.bitwarden-tui.bitwarden-tui.forwarders";
+const SERVICE_NAME: &str = "com.everything-tui.bw-tui.forwarders";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ForwarderService {
@@ -144,7 +144,7 @@ pub async fn generate_forwarded_alias(
 ) -> Result<String, String> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .user_agent("bitwarden-tui")
+        .user_agent("bw-tui")
         .build()
         .map_err(|e| e.to_string())?;
     let base = base(service, creds);

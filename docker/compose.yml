@@ -1,7 +1,7 @@
 services:
   vaultwarden:
     image: vaultwarden/server:latest
-    container_name: bitwarden-tui-vaultwarden
+    container_name: bw-tui-vaultwarden
     ports:
       - "8080:80"
     environment:
@@ -20,4 +20,4 @@ services:
 
 volumes:
   vw-data:
-    name: bitwarden-tui-vw-data
+    name: bw-tui-vw-data

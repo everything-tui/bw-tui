@@ -1,9 +1,9 @@
 //! Vault-browser navigation and keymap dispatch, driven through the mock vault.
 
+use bw_tui::app::{App, ClipboardKind, FocusPane, NewItemDest, Overlay, Screen};
+use bw_tui::events::handle_event;
+use bw_tui::models::{FilterKind, ItemType};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use vault_tui::app::{App, ClipboardKind, FocusPane, NewItemDest, Overlay, Screen};
-use vault_tui::events::handle_event;
-use vault_tui::models::{FilterKind, ItemType};
 
 fn press(code: KeyCode) -> Event {
     let mods = match code {
@@ -180,7 +180,7 @@ async fn palette_runs_commands_directly() {
     key(&mut app, KeyCode::Char(':')).await;
     chars(&mut app, "toggle favorite").await;
     let first = app.palette_filtered_actions()[0];
-    assert_eq!(first, vault_tui::action::Action::ToggleFavorite);
+    assert_eq!(first, bw_tui::action::Action::ToggleFavorite);
     key(&mut app, KeyCode::Enter).await;
     assert!(matches!(app.overlay, Overlay::None));
     assert_ne!(fav(&app), was_fav);
@@ -191,9 +191,9 @@ async fn palette_hides_navigation_primitives() {
     let mut app = mock_vault().await;
     key(&mut app, KeyCode::Char(':')).await;
     let actions = app.palette_filtered_actions();
-    assert!(!actions.contains(&vault_tui::action::Action::MoveDown));
-    assert!(actions.contains(&vault_tui::action::Action::GotoTrash));
-    assert!(actions.contains(&vault_tui::action::Action::ReceiveSend));
+    assert!(!actions.contains(&bw_tui::action::Action::MoveDown));
+    assert!(actions.contains(&bw_tui::action::Action::GotoTrash));
+    assert!(actions.contains(&bw_tui::action::Action::ReceiveSend));
 }
 
 #[tokio::test]
@@ -279,7 +279,10 @@ async fn new_item_picker_cycles_save_destination() {
     let Overlay::NewItemType { dests, dest, .. } = &app.overlay else {
         panic!("n opens the new item picker");
     };
-    assert_eq!(*dest, 0, "defaults to the personal vault outside a folder view");
+    assert_eq!(
+        *dest, 0,
+        "defaults to the personal vault outside a folder view"
+    );
     assert!(dests
         .iter()
         .any(|d| matches!(d.dest, NewItemDest::Personal { folder_id: Some(_) })));

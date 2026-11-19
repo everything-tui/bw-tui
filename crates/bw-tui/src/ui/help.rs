@@ -44,7 +44,7 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
         let palette = app.keymap.label(Action::OpenCommandPalette);
         format!("All commands are in the palette ({palette}) · rebind keys in config.toml")
     } else {
-        "bitwarden-tui · Vaultwarden client".to_string()
+        "bw-tui · Vaultwarden client".to_string()
     };
     frame.render_widget(
         Paragraph::new(footer)

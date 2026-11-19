@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use keyring::Entry;
 use tracing::warn;
 
-const SERVICE_NAME: &str = "com.bitwarden-tui.bitwarden-tui";
+const SERVICE_NAME: &str = "com.everything-tui.bw-tui";
 
 /// Abstraction over where refresh tokens are stored (OS keyring or test double).
 pub trait RefreshTokenStore: Send + Sync {

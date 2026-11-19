@@ -50,7 +50,7 @@ mod imp {
     use super::BiometricError;
     use keyring::Entry;
 
-    const SERVICE: &str = "com.bitwarden-tui.bitwarden-tui.biometric";
+    const SERVICE: &str = "com.everything-tui.bw-tui.biometric";
 
     fn entry(profile_id: &str) -> Result<Entry, BiometricError> {
         Entry::new(SERVICE, &format!("{profile_id}_biometricEnrolled"))

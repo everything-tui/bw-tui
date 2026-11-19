@@ -649,7 +649,13 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
             }
             app.close_overlay();
         }
-        KeyCode::Char('n') if is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. }) => {
+        KeyCode::Char('n')
+            if is_typing(&key)
+                && matches!(
+                    &app.overlay,
+                    Overlay::CustomFieldsForm { editing: None, .. }
+                ) =>
+        {
             if let Overlay::CustomFieldsForm {
                 editing,
                 edit_name,
@@ -668,7 +674,13 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
         }
-        KeyCode::Char('d') if is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. }) => {
+        KeyCode::Char('d')
+            if is_typing(&key)
+                && matches!(
+                    &app.overlay,
+                    Overlay::CustomFieldsForm { editing: None, .. }
+                ) =>
+        {
             if let Overlay::CustomFieldsForm {
                 fields,
                 selected,
@@ -739,7 +751,12 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
             }
         }
         KeyCode::Down | KeyCode::Char('j')
-            if key.code == KeyCode::Down || (is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. })) =>
+            if key.code == KeyCode::Down
+                || (is_typing(&key)
+                    && matches!(
+                        &app.overlay,
+                        Overlay::CustomFieldsForm { editing: None, .. }
+                    )) =>
         {
             if let Overlay::CustomFieldsForm {
                 fields,
@@ -754,7 +771,12 @@ async fn handle_custom_fields_form(app: &mut App, key: KeyEvent) -> bool {
             }
         }
         KeyCode::Up | KeyCode::Char('k')
-            if key.code == KeyCode::Up || (is_typing(&key) && matches!(&app.overlay, Overlay::CustomFieldsForm { editing: None, .. })) =>
+            if key.code == KeyCode::Up
+                || (is_typing(&key)
+                    && matches!(
+                        &app.overlay,
+                        Overlay::CustomFieldsForm { editing: None, .. }
+                    )) =>
         {
             if let Overlay::CustomFieldsForm {
                 fields,

@@ -1,10 +1,10 @@
 //! Every theme × terminal size × main screen renders without panicking.
 
+use bw_tui::app::{App, FocusPane, Overlay, Screen};
+use bw_tui::events::handle_event;
+use bw_tui::ui::theme::{theme, THEME_NAMES};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
-use vault_tui::app::{App, FocusPane, Overlay, Screen};
-use vault_tui::events::handle_event;
-use vault_tui::ui::theme::{theme, THEME_NAMES};
 
 async fn key(app: &mut App, code: KeyCode) {
     let mods = match code {
@@ -25,7 +25,7 @@ static THEME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 fn draw_all_sizes(app: &App) {
     for (w, h) in [(20, 6), (50, 15), (80, 24), (120, 40), (220, 60)] {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| vault_tui::ui::draw(f, app)).unwrap();
+        term.draw(|f| bw_tui::ui::draw(f, app)).unwrap();
     }
 }
 
@@ -102,7 +102,7 @@ async fn all_themes_render_all_screens_at_all_sizes() {
         app.lock();
         draw_all_sizes(&app);
     }
-    vault_tui::ui::init_theme("default", None);
+    bw_tui::ui::init_theme("default", None);
 }
 
 #[tokio::test]
@@ -126,7 +126,7 @@ async fn new_item_picker_shows_save_to_row() {
     key(&mut app, KeyCode::Char('n')).await;
     key(&mut app, KeyCode::Left).await;
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    term.draw(|f| vault_tui::ui::draw(f, &app)).unwrap();
+    term.draw(|f| bw_tui::ui::draw(f, &app)).unwrap();
     let buf = term.backend().buffer();
     let text: String = (0..buf.area.height)
         .map(|y| {

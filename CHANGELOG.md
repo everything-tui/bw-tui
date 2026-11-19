@@ -1,128 +1,125 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- **Modernized look ("flat & layered")**: pane borders are gone. Each column has its own background tone, and a header bar shows the breadcrumb, sync state, lock timer and profile. Other changes:
-  - Status bar: a mode chip plus keycap hints
-  - Item list: colored letter avatars, an always-visible search bar, aligned subtitle and badge columns
-  - Detail pane: stacked field labels with copy keycaps, grouped TOTP codes with a countdown glyph
-  - Dialogs float on a dimmed backdrop with soft edges, keycap hints, filled input fields and ◉/○ toggles
-  - Generator: colored password, strength meter and option toggles. Health report: stat tiles
-  - Login, unlock and 2FA: the brand and card are centered together
-- **Configurable themes**: 12 built-ins (default, Catppuccin Mocha/Latte, Tokyo Night, Rosé Pine, Gruvbox, Dracula, Nord, Bitwarden, Solarized, light, high-contrast). Other parts:
-  - `Ctrl+t` opens a live-preview picker that saves to `config.toml`
-  - Every color token can be overridden under `[colors]`
-  - `transparent_background = true` lets the terminal background show through
-- Every UI color now comes from the theme. Before, most screens hardcoded their own colors, so `theme = "…"` barely changed anything
-- Mouse clicks hit-test against the last drawn frame instead of re-deriving the layout
-- **Reworked vault navigation and shortcuts** (see README → Keybindings):
-  - `g` is now a go-to prefix with a popup: `g g` top, `g f` favorites, `g t` trash, `g s` sends, … `G` jumps to the bottom. The password generator moved from `g` to `P`
-  - `Enter` drills in (folders → items → detail → edit); `Esc` steps back (pane → search → marks). The detail pane scrolls with `j`/`k` when focused
-  - Card / SSH / notes / custom-field copy keys (`m v x p b o 1–9`) and `F` / `A` work from the item list, not only from the detail pane
-  - Undo delete is `U`, so `u` always copies the URI. `s` always cycles sort; New Send is `n` in the Sends view (`g s`) or from the palette
-  - In the Sends view, `c` copies the link and `o` opens a received Send link. Previously `O` was meant to open it but Shift+O share always took the key first
-  - Attachments: Ctrl+digit keys (which most terminals don't send) are gone; `V` opens the attachments list, which now has `d` delete and `a` upload
-  - `q` quits after a second press while a live vault is unlocked, instead of refusing
-  - Search: `Ctrl+n` / `Ctrl+p` move through results, `Ctrl+u` clears the query
-- Status bar shows key hints for the focused pane / view (items, detail, folders, trash, sends, marked items, search)
-- Command palette lists every command with its key and runs it directly. Many entries used to only say "use the keyboard shortcut". It also matches on key names and scrolls past the first page
-- Help overlay is generated from the live keymap and puts the current screen first
-- TUI New Send is a Quick create overlay (content + optional password; `Enter` saves; auto name). Tab to **Advanced…** (or `a` before typing) for the full field list; edit (`e`) still opens the full form
-
-### Fixed
-
-- `[keybindings]` overrides in `config.toml` were parsed but never applied; they now drive the vault browser, palette, help and hints. Letter case is significant (`c` ≠ `C`), and an action can have several keys
+## [0.2.0] - 2026-11-19
 
 ### Added
 
-- Feature-gap roadmap P0–P5: themes/keybinds, Sends+receive, zxcvbn/health/revision sync, multi-format import/export, timeout/sleep lock + org policies, org share/bulk, 2FA picker + account tools, power-user TUI (QR/editor/autotype/toasts/watchtower/domain rules), CLI unlock daemon / serve / CRUD / completions
-- Full Sends: file Sends (client-side encrypted upload via `POST /sends/file/v2`, direct + Azure upload types), password protection (PBKDF2-SHA256, 100k iterations, send key as salt), max access count, expiration/deletion dates (default deletion 7 days, max 31), hide email (respects org policy), disable, notes; TUI Send form + detail pane expanded; `Session::{create_send, create_file_send, update_send}`
-- Receive a Send: `POST /sends/access/{id}` (+ file download endpoint), decrypt with the URL-fragment key (HKDF salt `bitwarden-send`); TUI "Open Send link" overlay (`o` in the Sends view / palette) and CLI `receive <url>` (works without a saved session)
+- **Sends are complete**:
+  - Share files, not just text. Files are encrypted on your computer before they are uploaded
+  - Protect a Send with a password, limit how many times it can be opened, and choose when it expires or is deleted (after 7 days by default, at most 31)
+  - Hide your email address from recipients, turn a Send off, and add private notes
+- **Open Sends that others share with you**: press `o` in the Sends view, or run `bw-tui receive <url>`. The command works without logging in
+- Lock the vault automatically after a period of inactivity or when your computer goes to sleep. Your organization's policies are respected
+- Import from and export to more password-manager formats
+- Share items with an organization and act on several items at once
+- Choose which two-step login method to use when signing in, plus more account tools
+- Show a login as a QR code, edit notes in your own text editor, auto-type logins into other apps, and see short pop-up notifications
+- Command line: stay unlocked between commands, create, edit and delete items, and use tab completion in your shell
+
+### Modified
+
+- **New look**: pane borders are gone. Each column has its own background shade, and a header bar shows where you are, sync status, the auto-lock timer and your profile. Also:
+  - The status bar shows the current mode and the keys you can press
+  - The item list has colored letter icons, an always-visible search bar and neatly aligned details
+  - The detail pane shows each field's label above its value, with the key to copy it. Two-step login codes are grouped with a countdown
+  - Dialogs float over a dimmed background, with filled input fields and ◉/○ toggles
+  - The password generator colors the password and shows a strength meter. The health report shows summary tiles
+  - Login, unlock and two-step login screens are centered
+- **Themes**: choose from 12 built-in themes (default, Catppuccin Mocha/Latte, Tokyo Night, Rosé Pine, Gruvbox, Dracula, Nord, Bitwarden, Solarized, light, high-contrast):
+  - `Ctrl+t` opens a picker that previews each theme live and remembers your choice
+  - Change any single color under `[colors]` in `config.toml`
+  - `transparent_background = true` lets your terminal's background show through
+- Themes now color every screen. Before, changing `theme` only affected a few parts of the app
+- Mouse clicks now always land on what you see on screen
+- **New, more consistent shortcuts** (see README → Keybindings):
+  - `g` starts a "go to" shortcut with a hint popup: `g g` top, `g f` favorites, `g t` trash, `g s` Sends. `G` jumps to the bottom. The password generator moved from `g` to `P`
+  - `Enter` goes deeper (folders → items → details → edit) and `Esc` goes back. The detail pane scrolls with `j`/`k`
+  - Copy shortcuts for cards, SSH keys, notes and custom fields (`m v x p b o 1–9`), plus `F` and `A`, now also work from the item list
+  - Undo delete is now `U`, so `u` always copies the website. `s` always changes the sort order. Create a new Send with `n` in the Sends view or from the command palette
+  - In the Sends view, `c` copies the link and `o` opens a link someone sent you. Before, the shortcut for opening a link didn't work
+  - Attachments: press `V` to open the attachment list, then `d` to delete or `a` to upload. This replaces `Ctrl`+number shortcuts, which most terminals don't support
+  - `q` now asks you to press it a second time to quit while your vault is unlocked, instead of refusing to quit
+  - In search, `Ctrl+n` / `Ctrl+p` move through results and `Ctrl+u` clears what you typed
+- The status bar shows the keys you can press on the current screen
+- The command palette lists every action with its shortcut and runs it directly. Before, many entries only said "use the keyboard shortcut". You can also search it by key name, and it scrolls past the first page
+- The help screen always matches your current shortcuts and shows the current screen's keys first
+- Creating a Send is quicker: type the content, optionally add a password and press `Enter`. A name is filled in for you. Choose **Advanced…** (`Tab`, or `a` before typing) for all options. Editing a Send (`e`) still opens the full form
+
+### Fixed
+
+- Custom shortcuts under `[keybindings]` in `config.toml` were ignored. They now work everywhere: the vault, command palette, help screen and key hints. Upper and lower case are different keys (`c` is not `C`), and one action can have several keys
 
 ## [0.1.0] - 2026-10-12
 
 ### Added
 
-- Full Sends and receive (see Unreleased for continuing work)
-- Sync includes equivalent/global domains (no `excludeDomains`); stored on `Session` for URI matching
-- Org policies parsed on sync; generator clamping in TUI/CLI (`generate --apply-org-policy`); Send create blocked when disabled
-- TUI generator: password / passphrase / username modes, strength meter, `avoid_ambiguous`, min numbers/special
-- Health report opt-in HIBP counts (`h` in overlay; network only)
-- CLI `get --uri`; git-credential uses full URI + equivalent domains
-- Passkeys (FIDO2): `login.fido2Credentials` metadata (site, user, discoverable, created) shown in item detail; private key material is never decrypted; credentials are preserved verbatim on edit; clone warns that passkeys are not copied
-- Password strength via `zxcvbn` (score 0–4, warnings) in health report weak-password detection and the generator meter; `generate_password_min_score`
-- Health report: old passwords (>1 year), expired / expiring cards, inactive 2FA (built-in domain list + optional `2fa-directory.json` dataset in the data dir), opt-in HIBP email breach lookup (`BW_TUI_HIBP_API_KEY`)
-- Faster sync: `GET /accounts/revision-date` probe (`Session::sync_if_changed`); TUI polls it every `[sync] revision_poll_seconds` (default 60) and only full-syncs on change. SignalR push not implemented (documented)
-- Search operator `url: / `uri:`; default background sync interval 5 minutes
-
-### Security
-
-- Enforce master-password re-prompt before reveal / secret copy / edit when an item has `reprompt`
-- Removed leftover agent debug keystroke logger that could record master-password characters
-- Fixed Argon2 `kdfMemory` unit (API MiB → Argon2 KiB) and enforced KDF min/max bounds
-- Favorite toggles use `/ciphers/{id}/partial` to avoid wiping custom fields / history
-- Login edits preserve raw cipher fields and append password history on password change
-- Org/login edits use resolved cipher keys when org keys are available (partial/metadata preserved)
-- Atomic `0600` writes for auth/cache/profiles; clipboard clear on lock; panic terminal restore
+- **Browsing your vault**:
+  - The sidebar shows My vault, your organizations, collections and Sends, with nested folders. Items show which organization they belong to
+  - See every detail of logins, secure notes, cards, identities (including the full address) and SSH keys, with custom fields and password history (`H`)
+  - Create, edit and clone items (`Shift+C`) and move them to another folder (`Shift+M`). A login can have several websites, each with its own matching rule
+  - Edit organization items you have access to. Items you can't edit tell you so
+  - Rename and delete folders
+  - See, download, upload and delete attachments. Downloads are saved in your profile's `downloads/` folder
+  - Passkeys saved on a login appear in its details and are kept when you edit it. Cloning a login warns you that passkeys are not copied
+- **Finding things**:
+  - Search filters, including `url:` / `uri:` to find items by website
+  - A command palette (`:` or `Ctrl+k`) to run any action by name
+- **Copying**:
+  - Copy custom fields with `1`–`9`, plus more copy keys for cards, identities and SSH keys
+  - Copying also works when you use bw-tui on a remote machine, for example over SSH
+  - The clipboard clears itself after a delay you choose, per profile
+- **Password generator**:
+  - Create passwords, passphrases (optionally capitalized and with a number) and usernames (random word, plus-address or catch-all email)
+  - A strength meter with tips, an option to avoid look-alike characters, and minimum numbers and symbols
+  - Set `generate_password_min_score` in `config.toml` to only accept strong generated passwords
+  - Follows your organization's password rules. On the command line, use `generate --apply-org-policy`
+- **Health report** (`R`):
+  - Finds reused, weak, old (over a year) and duplicate passwords, and websites without HTTPS
+  - Finds cards that have expired or expire soon, and websites where you could turn on two-step login
+  - Optionally checks whether your passwords appeared in known data breaches (press `h`, needs internet)
+  - Optionally checks whether your email appeared in data breaches (set `BW_TUI_HIBP_API_KEY`)
+- **Sends**: create text Sends, edit (`e`) and delete (`d`) them, and copy the share link (`L`). Sends are blocked if your organization doesn't allow them
+- **Signing in and unlocking**:
+  - Log in with an API key, resend the two-step login email, and tick "remember this device" so you aren't asked for a code every time
+  - Unlock with a PIN instead of your master password (`Tab` or `p` on the lock screen). Too many wrong PINs lock it
+  - Turn on "master password re-prompt" for an item when editing it
+  - Account screen (`,`): see your fingerprint phrase and password hint, change your master password, set or remove your PIN, and turn the SSH agent on or off
+- **SSH agent** (macOS and Linux): use the SSH keys stored in your vault with `ssh`. The keys are removed when the vault locks
+- **Syncing**:
+  - The status bar shows when you last synced (for example `Synced 5m ago`)
+  - The vault syncs in the background every 5 minutes. Change it with `[sync] background_interval_minutes`
+  - Every minute, bw-tui checks whether anything changed and only downloads the vault when it did. Change it with `[sync] revision_poll_seconds`
+- Websites that belong together count as one when matching logins, for example a google.com login also matches youtube.com
+- **Import and export**: export to JSON, CSV or password-protected JSON. Import Bitwarden JSON files, including password-protected ones (`import --password`)
+- **Command line**:
+  - `--json` output for scripts
+  - `list` with `--search`, `--folder` and `--type`
+  - `get` finds items by approximate name, or by website with `--uri`. It tells you when several items match
+  - `generate`, `totp`, `delete`, `export` and `import`
+  - Use bw-tui as a Git credential helper (`git-credential`) and as a password prompt for other tools (`askpass`)
+- Use your vault offline from a local copy. Each profile locks itself automatically
+- Set your theme and generator defaults in `config.toml`
 
 ### Fixed
 
-- Send crypto matches official `makeSendKey` (HKDF salt `bitwarden-send`, info `send`, 16-byte material wrapped with user key)
-- Encrypted JSON import (`import_encrypted_json` / CLI `import --password`)
-- URI match type 4 (regex) implemented
-- TOTP countdown uses real period/remaining; support `steam://` and `otpauth://` secrets
-- `verify_reprompt` uses the account KDF (not default PBKDF2)
-- Failed unlock no longer leaves a wrong master key in memory
-- `register_finish` no longer treats "already/taken" as success
-- `set_tokens(..., None)` clears the refresh token
-- SSH key cipher model, EncString types 5/6, unicode subtitle truncation
+- Two-step login codes show the correct time left, and Steam Guard and `otpauth://` codes are supported
+- Sends created in bw-tui now open correctly in the official Bitwarden apps
+- Importing password-protected JSON exports now works
+- Logins that use the "regular expression" website matching rule now match
+- Master password re-prompt now works for accounts with non-default security settings
+- A wrong master password no longer causes problems on the next unlock attempt
+- Creating an account no longer reports success when the email address is already taken
+- Signing out now fully forgets your login
+- SSH key items, items saved in older formats, and long names with special characters now display correctly
+- Marking an item as favorite no longer erases its custom fields or password history
+- Editing a login keeps fields that bw-tui doesn't show, and changing a password saves the old one in password history
+- Editing organization items no longer risks losing data
+- If bw-tui crashes, your terminal goes back to normal
 
-### Added
+### Security
 
-#### Vault / session
-
-- Custom fields + password history decrypt/display; full identity address fields
-- URI match helpers (domain/host/startsWith/exact) and equivalent-domain grouping
-- Vault health reports (reused / weak / http / duplicates; optional HIBP)
-- Export JSON / CSV / encrypted JSON + Bitwarden JSON import
-- Bitwarden Send crypto helpers + API create/update/delete/list models
-- Attachment download URL helpers + typed `CipherAttachment`
-- Policy parsing (`parse_policies`) for generator / send policies
-- EFF large wordlist (7776) passphrase generator with capitalize / include-number
-- Username generators (word, plus-address, catch-all)
-- SSH agent (Unix): local `ssh-agent` socket under the profile dir, loads vault SSH keys via `ssh-add`; stop on lock
-- Master password change (`POST /accounts/password`) with local re-wrap of the user key
-- Account overlay: configure/clear PIN unlock, change master password form
-- Configurable clipboard auto-clear (per profile)
-- API-key login (`Session::login_api_key`) and email 2FA resend
-
-#### TUI
-
-- Master-password re-prompt overlay; reprompt toggle on login form
-- New-item type picker (login / note); folder rename/delete when folders focused
-- Passphrase mode in generator; API-key login fields; resend email 2FA
-- Expanded detail view (card/identity/SSH) with more copy keys
-- Command palette (`:` / Ctrl+k), password history (`H`), health report (`R`)
-- Custom field copy `1`–`9`; nested folder sidebar labels; search operators
-- OSC 52 clipboard fallback; `config.toml` (theme / generator defaults)
-- 2FA remember-device checkbox; persisted device token in profile `auth.json`
-- Sidebar: My vault, orgs, collections, Sends; org labels on items; org edit blocked message
-- Attachment names in detail; download/upload/delete; download to profile `downloads/`
-- Sends: edit/delete (`e`/`d`), copy share link (`L`); org login edit when key resolves
-- Account overlay (`,`) — fingerprint, password hint, change master password, PIN set/clear, SSH agent toggle
-- PIN unlock on lock screen (Tab/`p` when `pin.key` configured); lockout after failures
-- macOS Touch ID quick unlock: not implemented; use PIN unlock for faster re-entry
-- Status bar sync age (`Synced Nm ago`); optional background sync via `[sync] background_interval_minutes`
-- Sends list + text Send create; card create form; expanded new-item picker; clone (`Shift+C`)
-- Edit all personal cipher types (login/note/card/identity/SSH); multi-URI login form with match types
-- Move to folder (`Shift+M`); session `update_*` APIs with raw cipher round-trip
-
-#### CLI
-
-- `--json`; `list --search/--folder/--type`; fuzzy `get` with ambiguous-match error
-- `generate`, `totp`, `delete`, `export`, `import`, `git-credential`, `askpass`
-
-- CI (fmt/clippy/test) and Vaultwarden integration workflow
-- Offline vault cache improvements and profile auto-lock (prior work)
+- Items with "master password re-prompt" now always ask for your master password before showing, copying or editing secrets
+- Removed a leftover debug log that could record parts of your master password as you typed it
+- Unlocking now works with Argon2 account security settings, and unsafe security settings sent by a server are rejected
+- Saved login, cache and profile files can only be read by your user account, and are never left half-written
+- The clipboard is cleared when the vault locks

@@ -1,9 +1,9 @@
 //! Unit-test login field typing without a real TTY.
 
+use bw_tui::app::{App, LoginField, Overlay, ProfileManagerMode, Screen};
+use bw_tui::events::handle_event;
+use bw_tui::profiles::VaultProfile;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use vault_tui::app::{App, LoginField, Overlay, ProfileManagerMode, Screen};
-use vault_tui::events::handle_event;
-use vault_tui::profiles::VaultProfile;
 
 fn press(code: KeyCode) -> Event {
     Event::Key(KeyEvent::new(code, KeyModifiers::NONE))

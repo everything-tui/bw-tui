@@ -907,7 +907,7 @@ impl App {
         }
         self.power.keygen_armed = false;
         let comment = if name.trim().is_empty() {
-            "bitwarden-tui".to_string()
+            "bw-tui".to_string()
         } else {
             name.trim().to_string()
         };

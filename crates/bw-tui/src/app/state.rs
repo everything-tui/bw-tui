@@ -939,10 +939,7 @@ impl App {
         mock: bool,
     ) -> Result<Self, String> {
         let (data_root, mut profiles) = if mock {
-            (
-                PathBuf::from(".bitwarden-tui-mock"),
-                ProfilesFile::empty_default(),
-            )
+            (PathBuf::from(".bw-tui-mock"), ProfilesFile::empty_default())
         } else {
             let root = app_data_dir();
             let file = load_registry_from(&root);
