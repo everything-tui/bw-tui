@@ -49,7 +49,7 @@ fuzzy-matcher = "0.3"
 hkdf = "0.12"
 hmac = "0.12"
 pbkdf2 = "0.12"
-rand = "0.8"
+rand = "0.10"
 ratatui = "0.29"
 regex = "1"
 # native-tls matches platform trust stores (and AIA intermediate fetch on macOS).
