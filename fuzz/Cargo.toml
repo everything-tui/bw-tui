@@ -1,0 +1,25 @@
+[package]
+name = "bw-tui-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vault-crypto = { path = "../crates/vault-crypto" }
+serde_json = "1"
+
+[[bin]]
+name = "enc_string_parse"
+path = "fuzz_targets/enc_string_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sync_json"
+path = "fuzz_targets/sync_json.rs"
+test = false
+doc = false
