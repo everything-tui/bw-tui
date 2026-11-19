@@ -50,7 +50,7 @@ hkdf = "0.12"
 hmac = "0.12"
 pbkdf2 = "0.12"
 rand = "0.8"
-ratatui = "0.29"
+ratatui = "0.30"
 regex = "1"
 # native-tls matches platform trust stores (and AIA intermediate fetch on macOS).
 # rustls rejects some servers that omit intermediates from their TLS chain.
