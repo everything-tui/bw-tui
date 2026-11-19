@@ -37,7 +37,7 @@ vault-session = { path = "crates/vault-session" }
 aes = "0.8"
 anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
-argon2 = "0.5"
+argon2 = "0.6"
 base64 = "0.22"
 block-padding = "0.3"
 cbc = { version = "0.1", features = ["alloc"] }
