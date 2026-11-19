@@ -325,14 +325,14 @@ pub fn text_preview(bytes: &[u8]) -> Option<Vec<String>> {
 
 /// Strip any directory components / odd characters from an attachment file name.
 pub fn sanitize_file_name(name: &str) -> String {
-    let base = Path::new(name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("attachment");
+    // Same result on every OS: `Path::file_name` would also split on `\` on Windows only.
+    let base = name.rsplit('/').next().unwrap_or(name);
     let cleaned: String = base
         .chars()
         .map(|c| {
-            if c.is_control() || c == '/' || c == '\\' {
+            // `\` and the characters Windows forbids in file names (`:` would create an
+            // NTFS alternate data stream).
+            if c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
                 '_'
             } else {
                 c
@@ -1331,6 +1331,7 @@ mod tests {
         assert_eq!(sanitize_file_name("../../etc/passwd"), "passwd");
         assert_eq!(sanitize_file_name(".."), "attachment");
         assert_eq!(sanitize_file_name("a\\b.txt"), "a_b.txt");
+        assert_eq!(sanitize_file_name("C:a?.txt"), "C_a_.txt");
         assert_eq!(sanitize_file_name(""), "attachment");
     }
 
