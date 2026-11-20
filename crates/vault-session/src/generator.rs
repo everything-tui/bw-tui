@@ -1,5 +1,6 @@
-use rand::rngs::OsRng;
-use rand::Rng;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
+use rand::RngExt;
 
 const LOWER: &str = "abcdefghijkmnopqrstuvwxyz";
 const UPPER: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -80,7 +81,7 @@ pub fn generate_password_min_score(
         .ok_or_else(|| "password generation failed".into())
 }
 
-/// Generate a password with per-class guarantees using `OsRng`.
+/// Generate a password with per-class guarantees using the OS RNG.
 ///
 /// Returns an error if `length` is outside 8..=128 or no character classes are enabled.
 pub fn generate_password_checked(opts: GeneratorOptions) -> Result<String, String> {
@@ -125,12 +126,12 @@ pub fn generate_password_checked(opts: GeneratorOptions) -> Result<String, Strin
     }
 
     let charset: Vec<char> = classes.iter().flat_map(|s| s.chars()).collect();
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let mut out: Vec<char> = classes
         .iter()
         .map(|cls| {
             let chars: Vec<char> = cls.chars().collect();
-            chars[rng.gen_range(0..chars.len())]
+            chars[rng.random_range(0..chars.len())]
         })
         .collect();
 
@@ -143,20 +144,20 @@ pub fn generate_password_checked(opts: GeneratorOptions) -> Result<String, Strin
         if digit_chars.is_empty() {
             break;
         }
-        out.push(digit_chars[rng.gen_range(0..digit_chars.len())]);
+        out.push(digit_chars[rng.random_range(0..digit_chars.len())]);
         numbers_added += 1;
     }
     while opts.symbols && specials_added < opts.min_special && out.len() < opts.length {
-        out.push(symbol_chars[rng.gen_range(0..symbol_chars.len())]);
+        out.push(symbol_chars[rng.random_range(0..symbol_chars.len())]);
         specials_added += 1;
     }
 
     while out.len() < opts.length {
-        out.push(charset[rng.gen_range(0..charset.len())]);
+        out.push(charset[rng.random_range(0..charset.len())]);
     }
     // Fisher–Yates shuffle
     for i in (1..out.len()).rev() {
-        let j = rng.gen_range(0..=i);
+        let j = rng.random_range(0..=i);
         out.swap(i, j);
     }
     Ok(out.into_iter().collect())
@@ -215,10 +216,10 @@ pub fn generate_passphrase(words: usize, separator: &str) -> String {
 pub fn generate_passphrase_opts(opts: PassphraseOptions, separator: &str) -> String {
     let list = wordlist();
     let n = opts.words.clamp(3, 20);
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let mut parts: Vec<String> = (0..n)
         .map(|_| {
-            let mut w = list[rng.gen_range(0..list.len())].to_string();
+            let mut w = list[rng.random_range(0..list.len())].to_string();
             if opts.capitalize && !w.is_empty() {
                 let mut chars = w.chars();
                 if let Some(first) = chars.next() {
@@ -229,8 +230,8 @@ pub fn generate_passphrase_opts(opts: PassphraseOptions, separator: &str) -> Str
         })
         .collect();
     if opts.include_number && !parts.is_empty() {
-        let idx = rng.gen_range(0..parts.len());
-        let num: u8 = rng.gen_range(0..10);
+        let idx = rng.random_range(0..parts.len());
+        let num: u8 = rng.random_range(0..10);
         parts[idx].push(char::from(b'0' + num));
     }
     parts.join(separator)
@@ -239,8 +240,8 @@ pub fn generate_passphrase_opts(opts: PassphraseOptions, separator: &str) -> Str
 /// Random username word from the EFF wordlist.
 pub fn generate_username_word() -> String {
     let list = wordlist();
-    let mut rng = OsRng;
-    list[rng.gen_range(0..list.len())].to_string()
+    let mut rng = UnwrapErr(SysRng);
+    list[rng.random_range(0..list.len())].to_string()
 }
 
 /// Plus-addressed email: `local+tag@domain`.

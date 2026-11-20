@@ -4,7 +4,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
 use hmac::Hmac;
 use pbkdf2::pbkdf2;
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256 as Sha256Digest;
 use vault_crypto::{
@@ -640,7 +640,7 @@ pub fn export_encrypted_json(
     let plaintext = export_json(items, folders);
 
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     let master = derive_export_master_key(password, kdf, &salt)?;
     let stretched = stretch_master_key(&master)?;
     let sym: SymmetricCryptoKey = (&stretched).into();

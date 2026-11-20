@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 authors = ["everything-tui contributors"]
@@ -34,32 +34,35 @@ vault-crypto = { path = "crates/vault-crypto" }
 vault-api = { path = "crates/vault-api" }
 vault-session = { path = "crates/vault-session" }
 
-aes = "0.8"
+aes = "0.9"
 anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
-argon2 = "0.5"
+argon2 = "0.6"
 base64 = "0.22"
-block-padding = "0.3"
-cbc = { version = "0.1", features = ["alloc"] }
+block-padding = "0.4"
+cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-crossterm = "0.28"
+crossterm = "0.29"
 directories = "6"
 fuzzy-matcher = "0.3"
-hkdf = "0.12"
-hmac = "0.12"
-pbkdf2 = "0.12"
-rand = "0.8"
-ratatui = "0.29"
+hkdf = "0.13"
+hmac = "0.13"
+pbkdf2 = "0.13"
+rand = "0.10"
+ratatui = "0.30"
 regex = "1"
 # native-tls matches platform trust stores (and AIA intermediate fetch on macOS).
 # rustls rejects some servers that omit intermediates from their TLS chain.
-reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "multipart"] }
-rsa = { version = "0.9", features = ["sha2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "multipart", "form"] }
+# rsa 0.9 is on the older RustCrypto traits: use its re-exported sha2 and rand_core.
+rsa = { version = "0.9", features = ["sha2", "getrandom"] }
+# OAEP-SHA1 for rsa 0.9 needs digest 0.10 hashes.
+sha1-rsa = { package = "sha1", version = "0.10" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_repr = "0.1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 totp-rs = { version = "5", features = ["otpauth", "steam"] }
@@ -69,7 +72,7 @@ zeroize = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
-sha1 = "0.10"
+sha1 = "0.11"
 percent-encoding = "2"
 keyring = "3"
 qrcode = { version = "0.14", default-features = false }

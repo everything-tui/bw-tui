@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1] - 2026-11-19
+
+### Modified
+
+- Behind-the-scenes improvements to reliability: updated the libraries bw-tui uses for encryption, networking and drawing the screen
+
 ## [0.2.0] - 2026-11-19
 
 ### Added
