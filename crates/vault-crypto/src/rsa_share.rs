@@ -12,7 +12,7 @@ use crate::keys::UserKey;
 pub fn rsa_encrypt_user_key(user_key: &UserKey, public_key_b64: &str) -> Result<String> {
     use rsa::pkcs8::DecodePublicKey;
     use rsa::{Oaep, RsaPublicKey};
-    use sha1::Sha1;
+    use sha1_rsa::Sha1;
 
     let der = base64::engine::general_purpose::STANDARD
         .decode(public_key_b64.trim())
@@ -21,7 +21,11 @@ pub fn rsa_encrypt_user_key(user_key: &UserKey, public_key_b64: &str) -> Result<
         RsaPublicKey::from_public_key_der(&der).map_err(|e| CryptoError::Rsa(e.to_string()))?;
     let bytes = user_key.to_bytes();
     let ct = public
-        .encrypt(&mut rand::thread_rng(), Oaep::new::<Sha1>(), bytes.as_ref())
+        .encrypt(
+            &mut rsa::rand_core::OsRng,
+            Oaep::new::<Sha1>(),
+            bytes.as_ref(),
+        )
         .map_err(|e| CryptoError::Rsa(e.to_string()))?;
     Ok(format!(
         "4.{}",

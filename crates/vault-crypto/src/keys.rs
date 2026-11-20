@@ -1,5 +1,5 @@
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -130,11 +130,11 @@ pub fn wrap_user_key(user_key: &UserKey, master_key: &MasterKey) -> Result<Strin
 
 /// Generate a new random user key.
 pub fn generate_user_key() -> UserKey {
-    use rand::RngCore;
+    use rand::Rng;
     let mut enc_key = [0u8; 32];
     let mut mac_key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut enc_key);
-    rand::thread_rng().fill_bytes(&mut mac_key);
+    rand::rng().fill_bytes(&mut enc_key);
+    rand::rng().fill_bytes(&mut mac_key);
     SymmetricCryptoKey { enc_key, mac_key }
 }
 
@@ -156,7 +156,8 @@ pub fn generate_rsa_keypair() -> Result<RsaKeyPair> {
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use rsa::RsaPrivateKey;
 
-    let mut rng = rand::thread_rng();
+    // rsa 0.9 uses rand_core 0.6: take its OS RNG, not rand 0.10's.
+    let mut rng = rsa::rand_core::OsRng;
     let private_key =
         RsaPrivateKey::new(&mut rng, 2048).map_err(|e| CryptoError::Rsa(e.to_string()))?;
     let public_key = private_key.to_public_key();
@@ -203,9 +204,9 @@ pub fn unwrap_org_key_with_user(
     user_key: Option<&UserKey>,
 ) -> Result<OrgKey> {
     use rsa::pkcs8::DecodePrivateKey;
+    use rsa::sha2::Sha256;
     use rsa::{Oaep, RsaPrivateKey};
-    use sha1::Sha1;
-    use sha2::Sha256;
+    use sha1_rsa::Sha1;
 
     let enc = if protected_org_key.contains('.') {
         EncString::parse(protected_org_key)?

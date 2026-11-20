@@ -6,7 +6,7 @@
 //! Child module of `session` so it can reuse private session state.
 
 use base64::Engine;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use vault_api::{
     percent_encode, ApiError, AuthRequestApproval, ChangeKdfRequest, CreateAuthRequest,
@@ -99,7 +99,7 @@ impl SessionError {
 /// PKCE verifier / S256 challenge pair.
 pub fn pkce_pair() -> (String, String) {
     let mut bytes = [0u8; 48];
-    rand::thread_rng().fill(&mut bytes[..]);
+    rand::rng().fill(&mut bytes[..]);
     let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let verifier = enc.encode(bytes);
     let challenge = enc.encode(Sha256::digest(verifier.as_bytes()));
@@ -108,9 +108,9 @@ pub fn pkce_pair() -> (String, String) {
 
 fn random_token(len: usize) -> String {
     const CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..len)
-        .map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char)
+        .map(|_| CHARS[rng.random_range(0..CHARS.len())] as char)
         .collect()
 }
 

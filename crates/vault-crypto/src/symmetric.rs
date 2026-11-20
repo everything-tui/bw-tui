@@ -1,6 +1,6 @@
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-use hmac::{Hmac, Mac};
-use rand::RngCore;
+use aes::cipher::{block_padding::Pkcs7, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
+use hmac::{Hmac, KeyInit, Mac};
+use rand::Rng;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -40,10 +40,10 @@ pub fn decrypt_bytes(enc_str: &str, key: &SymmetricCryptoKey) -> Result<Vec<u8>>
 
 pub fn encrypt_raw(plaintext: &[u8], key: &SymmetricCryptoKey) -> Result<EncString> {
     let mut iv = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut iv);
+    rand::rng().fill_bytes(&mut iv);
 
     let encryptor = Aes256CbcEnc::new(key.enc_key().into(), (&iv).into());
-    let ciphertext = encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    let ciphertext = encryptor.encrypt_padded_vec::<Pkcs7>(plaintext);
 
     // MAC = HMAC-SHA256(mac_key, iv || ciphertext)
     let mut mac =
@@ -91,7 +91,7 @@ fn decrypt_type2(enc: &EncString, key: &SymmetricCryptoKey) -> Result<Vec<u8>> {
     let decryptor = Aes256CbcDec::new(key.enc_key().into(), (&iv).into());
     let mut buf = Zeroizing::new(enc.data.clone());
     decryptor
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map(|pt| pt.to_vec())
         .map_err(|_| CryptoError::DecryptFailed)
 }
@@ -121,7 +121,7 @@ fn decrypt_type1(enc: &EncString, key: &SymmetricCryptoKey) -> Result<Vec<u8>> {
     let decryptor = Aes128CbcDec::new((&aes_key).into(), (&iv).into());
     let mut buf = Zeroizing::new(enc.data.clone());
     decryptor
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map(|pt| pt.to_vec())
         .map_err(|_| CryptoError::DecryptFailed)
 }
@@ -136,7 +136,7 @@ fn decrypt_type0(enc: &EncString, key: &SymmetricCryptoKey) -> Result<Vec<u8>> {
     let decryptor = Aes256CbcDec::new(key.enc_key().into(), (&iv).into());
     let mut buf = Zeroizing::new(enc.data.clone());
     decryptor
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_padded::<Pkcs7>(&mut buf)
         .map(|pt| pt.to_vec())
         .map_err(|_| CryptoError::DecryptFailed)
 }
@@ -181,13 +181,13 @@ mod tests {
 
     #[test]
     fn type0_decrypt_roundtrip() {
-        use aes::cipher::{BlockEncryptMut, KeyIvInit};
+        use aes::cipher::{BlockModeEncrypt, KeyIvInit};
         type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
         let key = test_key();
         let iv = [3u8; 16];
         let encryptor = Aes256CbcEnc::new(key.enc_key().into(), (&iv).into());
-        let ct = encryptor.encrypt_padded_vec_mut::<Pkcs7>(b"legacy-type0");
+        let ct = encryptor.encrypt_padded_vec::<Pkcs7>(b"legacy-type0");
         let engine = base64::engine::general_purpose::STANDARD;
         let enc_str = format!("0.{}|{}", engine.encode(iv), engine.encode(&ct));
         assert_eq!(decrypt_with_key(&enc_str, &key).unwrap(), "legacy-type0");
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn type1_decrypt_with_64_byte_key() {
-        use aes::cipher::{BlockEncryptMut, KeyIvInit};
+        use aes::cipher::{BlockModeEncrypt, KeyIvInit};
         type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
         type HmacSha256 = Hmac<Sha256>;
 
@@ -204,7 +204,7 @@ mod tests {
         let mut aes_key = [0u8; 16];
         aes_key.copy_from_slice(&key.enc_key()[..16]);
         let encryptor = Aes128CbcEnc::new((&aes_key).into(), (&iv).into());
-        let ct = encryptor.encrypt_padded_vec_mut::<Pkcs7>(b"type-one");
+        let ct = encryptor.encrypt_padded_vec::<Pkcs7>(b"type-one");
         let mut mac = HmacSha256::new_from_slice(key.mac_key()).unwrap();
         mac.update(&iv);
         mac.update(&ct);

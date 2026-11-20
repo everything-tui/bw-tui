@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rand::RngCore;
+use rand::Rng;
 use vault_crypto::{
     decrypt_bytes, derive_master_key, encrypt_bytes, stretch_master_key, KdfParams,
     SymmetricCryptoKey, UserKey, PBKDF2_MIN_ITERATIONS,
@@ -116,7 +116,7 @@ pub fn unlock_with_pin(data_dir: &Path, email: &str, pin: &str) -> Result<UserKe
 
 pub fn random_numeric_pin(digits: usize) -> String {
     let n = digits.clamp(4, 12);
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rand_core::UnwrapErr(rand::rngs::SysRng);
     (0..n)
         .map(|_| {
             let mut b = [0u8; 1];

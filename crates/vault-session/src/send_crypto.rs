@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use hkdf::Hkdf;
-use rand::RngCore;
+use rand::Rng;
 use sha2::Sha256;
 use vault_crypto::{decrypt_with_key, encrypt_with_key, SymmetricCryptoKey};
 
@@ -15,7 +15,7 @@ use crate::error::{Result, SessionError};
 /// Random 16-byte send key material (Bitwarden URL fragment / secret).
 pub fn generate_send_key_material() -> [u8; 16] {
     let mut key = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     key
 }
 
