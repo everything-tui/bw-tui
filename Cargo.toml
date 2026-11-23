@@ -79,5 +79,5 @@ qrcode = { version = "0.14", default-features = false }
 ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rand_core"] }
 zxcvbn = "3"
 csv = "1"
-roxmltree = "0.20"
+roxmltree = "0.21"
 zip = { version = "2", default-features = false, features = ["deflate"] }
