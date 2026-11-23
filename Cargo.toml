@@ -80,4 +80,4 @@ ssh-key = { version = "0.6", default-features = false, features = ["std", "ed255
 zxcvbn = "3"
 csv = "1"
 roxmltree = "0.20"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
