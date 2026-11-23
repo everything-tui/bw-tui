@@ -33,7 +33,7 @@ rand.workspace = true
 sha2.workspace = true
 percent-encoding.workspace = true
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 
 [features]
 default = ["autotype"]
