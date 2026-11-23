@@ -38,7 +38,7 @@ aes = "0.9"
 anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 argon2 = "0.6"
-base64 = "0.22"
+base64 = "0.23"
 block-padding = "0.4"
 cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
